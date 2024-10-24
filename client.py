@@ -1,2 +1,153 @@
-#TODO: open file with private and public key
-#TODO: add cli to push transactions to blockchain.
+import argparse
+import os
+import hashlib
+import time
+import json
+from ecdsa import SigningKey, SECP256k1
+from ecdsa.util import randrange_from_seed__trytryagain
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.backends import default_backend
+
+def make_asymetric_key(seed):
+    secexp = randrange_from_seed__trytryagain(seed, SECP256k1.order)
+    return SigningKey.from_secret_exponent(secexp, curve=SECP256k1)
+
+def get_keys_from_seed(seed: str, num: int) -> dict:
+    lock = dict()
+    for i in range(num):
+        s_key = make_asymetric_key(f"{i}:"+seed)
+        v_key = s_key.verifying_key
+        lock[i]={
+        "private_key": s_key.to_string().hex(),
+        "public_key": v_key.to_string().hex()
+        }
+    
+    return lock
+
+def p2pk_script(public_key):
+    lenght = 32 #TODO:lenght of script
+    print(f"header {lenght}") #magic bytes
+    print("pk:" + public_key) #pub key
+    print("op: checksig")   #opcode
+    pass
+
+#TODO: save- keypairs for each of your addresses
+#transactions done from/to your addresses
+#to an ecrypted file
+def derive_symetric_key(password: str) -> bytes:
+    kdf = Scrypt(
+        salt=b'',  # Używamy pustej soli
+        length=32,
+        n=2**14,
+        r=8,
+        p=1,
+        backend=default_backend()
+    )
+    key = kdf.derive(password.encode())
+    return key
+
+def encrypt_data(key: bytes, plaintext: bytes) -> bytes:
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    return nonce + ciphertext  # Zwracamy nonce wraz z szyfrogramem
+
+def decrypt_data(key: bytes, data: bytes) -> bytes:
+    nonce = data[:12]
+    ciphertext = data[12:]
+    aesgcm = AESGCM(key)
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    return plaintext
+
+def save_to_file(filename: str, password: str, data: dict):
+    key = derive_symetric_key(password)
+    plaintext = json.dumps(data).encode()
+    ciphertext = encrypt_data(key, plaintext)
+    with open(filename, 'wb') as f:
+        f.write(ciphertext)  
+
+def load_from_file(filename: str, password: str) -> dict:
+    with open(filename, 'rb') as f:
+        file_data = f.read()
+    key = derive_symetric_key(password)
+    plaintext = decrypt_data(key, file_data)
+    data = json.loads(plaintext.decode())
+    return data
+
+def mock_transaction() -> list:
+    result =  [
+    {
+        'txid': 'transakcja_1',
+        'inputs': [
+            {'address': 'adres_1', 'amount': -50},
+            {'address': 'adres_2', 'amount': -30},
+        ],
+        'outputs': [
+            {'address': 'adres_3', 'amount': 80},
+        ],
+        'address_changes': {
+            'adres_1': -50,
+            'adres_2': -30,
+            'adres_3': 80,
+        }
+    },
+    {
+        'txid': 'transakcja_2',
+        'inputs': [
+            {'address': 'adres_3', 'amount': -20},
+        ],
+        'outputs': [
+            {'address': 'adres_1', 'amount': 20},
+        ],
+        'address_changes': {
+            'adres_3': -20,
+            'adres_1': 20,
+        }
+    },
+    ]
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="en")
+    parser.add_argument("--seed", type=str, help="Specify a recovery string for a wallet", default='0')
+    parser.add_argument("--number", type=int, help="Specify number of keys to access", default=1)
+    parser.add_argument("--f", type=str, help="open file", default=None)
+    parser.add_argument("--p", type=str, help="password", default="")
+
+    args = parser.parse_args()
+    wallet = {
+    'keypairs': None,
+    'transaction_cache': mock_transaction()
+    }
+    if args.f != None:
+        wallet = load_from_file(args.f, args.p)
+    
+    elif args.seed == '0':
+        seed = os.urandom(32).hex() # Generate a random 32-byte seed
+        print(f"Generated new random seed: {seed}")
+        wallet['keypairs'] = get_keys_from_seed(seed, args.number)
+    else:
+        seed = args.seed
+        print(f"Using provided seed")
+        wallet['keypairs'] = get_keys_from_seed(seed, args.number)
+    
+    # Generate ECDSA keypair based on the seed
+    
+    for key in wallet['keypairs'].keys():        
+        # Display  (keypairs)
+        print(f"ECDSA keypair number: {key}")
+        print(f"Master Private Key: {wallet['keypairs'][key]['private_key']}")
+        print(f"Master Public Key: {wallet['keypairs'][key]['public_key']}")
+    
+    timestr = time.strftime("%H%M%S.dat")
+    data_to_save = {
+    'keypairs': wallet['keypairs'],
+    'transaction_cache': mock_transaction()
+    }
+    save_to_file(timestr, args.p, data_to_save)
+    #TODO:implement api connection and user transaction cli
+
+if __name__ == "__main__":
+    main()
