@@ -3,12 +3,13 @@ import logging
 import signal
 import socket
 from daemonize import Daemonize
+from multiprocessing import Process
 from datetime import datetime
 
 def parseArgs() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--init", action="store_true")
-    parser.add_argument("--join-pid", type=int)
+    parser.add_argument("--join", type=int)
     return parser.parse_args()
 
 
@@ -31,7 +32,7 @@ class Node:
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.DEBUG)
         logger.propagate = False
-        fh = logging.FileHandler(f"/tmp/{self.name}.log", "w")
+        fh = logging.FileHandler(f"{self.name}.log", "w")
         fh.setLevel(logging.DEBUG)
         logger.addHandler(fh)
         return logger
@@ -63,9 +64,22 @@ class Node:
         if self.config.init:
             self.serve()
 
+def client(port: int):
+    msg = "Connected"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect(("localhost", port))
+        while msg != "close":
+            s.sendall(msg.encode())
+            data = s.recv(1024)
+            print(f"({s.getpeername()[1]})S: {data!r}")
+            msg = input(f"({s.getsockname()[1]})C: ")
+
 if __name__ == "__main__":
     config = parseArgs()
     node = Node(config)
     print(f"Server listening on port: {node.port}")
-    daemon = Daemonize(app=node.name, pid=node.pid, action=node.start, auto_close_fds=False)
+    daemon = Process(target=node.start, daemon=True)
     daemon.start()
+    if (config.join):
+        client(config.join)
+    daemon.join()
