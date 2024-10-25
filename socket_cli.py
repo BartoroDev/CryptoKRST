@@ -10,12 +10,14 @@ def parseArgs() -> argparse.Namespace:
     return args.port
 
 def main(port):
+    msg = "Connected"
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((HOST, port))
-        s.sendall(b"Test message")
-        data = s.recv(1024)
-
-    print(f"Received {data!r}")
+        while msg != "close":
+            s.sendall(msg.encode())
+            data = s.recv(1024)
+            print(f"({s.getpeername()[1]})S: {data!r}")
+            msg = input(f"({s.getsockname()[1]})C: ")
 
 if __name__ == "__main__":
     port = parseArgs()
