@@ -18,7 +18,7 @@ Foothold Node-a:
 - api do wpisania wartości do dummy jsona. - Macin
 
 
-Technoilogia:
+Technologia:
 hashlib and datetime 
 zrobic klase obiektow z polami: "transaction data, the previous block’s hash, the current block’s hash, nonce, and timestamp."
 zrobic klase blockchain: [..]
@@ -31,3 +31,17 @@ python3 api.py
 http://127.0.0.1:8000/docs - swagger gui to test API
 
 ![test socket conn](https://i.imgur.com/LWxQduQ.png)
+
+### Uruchomienie Node'a:
+    python node.py [--name name_val] [--join port_num1 [ port_num2 ...[ port_numN]]]
+    ex: python node.py --name A1 --join 11111 22222
+
+Logi servera są zapisywane w pliku  "server_{server_name}_{server_port}.log".
+
+### Łączenie się z Node'em:
+    python socket_cli.py node_port
+    ex: python socket_cli.py 12345
+#### wysyłanie broadcastów:
+Aby wysłać broadcast, wiadomość należy zacząć od prefixu "b!":
+
+    (11223)C: b!Hello
