@@ -34,7 +34,7 @@ python .\socket_api.py --name B --join 53962
 
 http://127.0.0.1:8XXX/docs - swagger gui do test API api będzie na losowym porcie z przedziału 8000-8999
 
-![rest api broadcasting](https://imgur.com/a/TZYuRyK)
+![rest api broadcasting](https://i.imgur.com/gpSycSo.png)
 
 ### Samo Uruchomienie Node'a:
     python node.py [--name name_val] [--join port_num1 [ port_num2 ...[ port_numN]]]
