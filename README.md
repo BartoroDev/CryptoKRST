@@ -23,22 +23,26 @@ hashlib and datetime
 zrobic klase obiektow z polami: "transaction data, the previous block’s hash, the current block’s hash, nonce, and timestamp."
 zrobic klase blockchain: [..]
 
-HOW TO USE:
+# HOW TO USE:
 pip install -r requirements.txt
 
-python3 api.py  
+#### Najpierw musimy uruchomić node w trybie init z uruchomionym api   
+python socket_api.py  
 
-http://127.0.0.1:8000/docs - swagger gui to test API
+#### Później możemy dołączyć do node-a podając port  
+python .\socket_api.py --name B --join 53962
 
-![test socket conn](https://i.imgur.com/LWxQduQ.png)
+http://127.0.0.1:8XXX/docs - swagger gui do test API api będzie na losowym porcie z przedziału 8000-8999
 
-### Uruchomienie Node'a:
+![rest api broadcasting](https://imgur.com/a/TZYuRyK)
+
+### Samo Uruchomienie Node'a:
     python node.py [--name name_val] [--join port_num1 [ port_num2 ...[ port_numN]]]
     ex: python node.py --name A1 --join 11111 22222
 
 Logi servera są zapisywane w pliku  "server_{server_name}_{server_port}.log".
 
-### Łączenie się z Node'em:
+### samo Łączenie się z Node'em:
     python socket_cli.py node_port
     ex: python socket_cli.py 12345
 #### wysyłanie broadcastów:
