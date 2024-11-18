@@ -25,12 +25,28 @@ def get_keys_from_seed(seed: str, num: int) -> dict:
     
     return lock
 
+def get_public_key_from_seed(seed: str, num: int) -> str:
+    s_key = make_asymetric_key(f"{num}:"+seed)
+    v_key = s_key.verifying_key
+    return v_key.to_string().hex()
+
 def p2pk_script(public_key):
     lenght = 32 #TODO:lenght of script
     print(f"header {lenght}") #magic bytes
     print("pk:" + public_key) #pub key
     print("op: checksig")   #opcode
     pass
+
+def sign_data(seed: str, data: str) -> str:
+    keys=get_keys_from_seed(seed, 1) #TODO:fix it later
+    """Sign the given data using the private key."""
+    private_key_bytes = bytes.fromhex(keys[0]["private_key"])
+    sk = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+    signature = sk.sign(data.encode()).hex()
+    return {
+        "signature": signature,
+        "public_key": keys[0]["public_key"]
+    }
 
 #TODO: save- keypairs for each of your addresses
 #transactions done from/to your addresses
@@ -125,8 +141,8 @@ def main():
         wallet = load_from_file(args.f, args.p)
     
     elif args.seed == '0':
-        seed = os.urandom(32).hex() # Generate a random 32-byte seed
-        print(f"Generated new random seed: {seed}")
+        seed ="my_secure_seed" # Generate a random 32-byte seed
+        print(f"Generated seed: {seed}")
         wallet['keypairs'] = get_keys_from_seed(seed, args.number)
     else:
         seed = args.seed
