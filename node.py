@@ -3,9 +3,17 @@ import threading
 import socket
 import logging
 import argparse
+from fastapi import FastAPI
+from pydantic import BaseModel
 
+from typing import Union
 from enum import Flag
 from zlib import adler32
+
+import uvicorn
+
+
+# ------------- PROTOCOL -------------
 
 class Message:
     # |VERSION(1b)|TYPE(1b)|HASH(4b)|DATA_LENGTH(1b)|DATA|
@@ -34,7 +42,7 @@ class Message:
         return self.version.toBytes() + self.type.toBytes() + self.hash.to_bytes(4, byteorder='big') + self.dataLength.to_bytes() + self.data
 
     @classmethod
-    def fromData(cls, data: bytes, version: Version, type: Type, id: int):
+    def fromData(cls, data: bytes, version: Version, type: Type):
         dataLen = len(data)
         hash = adler32(data + time.ctime().encode())
         raw = version.toBytes() + type.toBytes() + hash.to_bytes(4) + dataLen.to_bytes() + data
@@ -61,103 +69,140 @@ class MessageQueue:
         return False if ret > 0 else True
 
 
-class Node:
-    class Connection():
-        def __init__(self, connection: socket.socket, destination, id, node: "Node"):
-            self.socket = connection
-            self.destination = destination
-            self.id = id
-            self.msgCount = 0
-            self.node = node
-            self.logger = node.logger
-            self.txQueue = MessageQueue()
-            self.socket.setblocking(False)
-            self._running = False
+#  ------------- HTTP SERVER -------------
 
-        def closeConnection(self):
-            self.node.removeConnection(self)
-            self.logger.info(f"Closing connection with: {self.destination}")
-            self._running = False
+class HTTPServer:
+    class Transaction(BaseModel):
+        signature: str
+        signer_public_key: str
+        value: str
+
+    def __init__(self,  node: "Node", logger: logging.Logger):
+        self.app = FastAPI()
+        self.node = node
+        self.logger = logger
+        self.addAppRoutes()
+
+    def addAppRoutes(self):
+        # define all routes here
+        self.app.add_api_route("/", self.hello, methods=["GET"])
+        self.app.add_api_route("/transaction", self.add_transaction, methods=["POST"])
 
 
-        def loop(self):
-            self._running = True
-            with self.socket:
-                self.logger.info(f"Connected with {self.destination}")
-                while self._running:
-                    self.receiveMessage()
-                    self.sendMessage()
-                    
+    def hello(self):
+        return {"Hello": "World"}
 
-        def sendMessage(self):
+    def add_transaction(self, transaction: Transaction):
+        msgType = Message.Type.BROADCAST if transaction.value[:2] == "b!" else Message.Type.UNICAST
+        if (msgType == Message.Type.BROADCAST):
+            msg = Message.fromData(transaction.value[2:].encode(), Message.Version.VERSION_ONE, msgType)
+            self.node.broadcastMessage(msg)
+
+        return {"received signature":transaction.value}
+
+    def run(self):
+        uvicorn.run(self.app, port=0, log_level="debug")
+
+
+# ------------- SOCKET SERVER / NODE -------------
+
+class Connection:
+    def __init__(self, connection: socket.socket, destination, id, node: "Node"):
+        self.socket = connection
+        self.destination = destination
+        self.id = id
+        self.msgCount = 0
+        self.node = node
+        self.logger = node.logger
+        self.txQueue = MessageQueue()
+        self.socket.setblocking(False)
+        self._running = False
+
+    def closeConnection(self):
+        self.node.removeConnection(self)
+        self.logger.info(f"Closing connection with: {self.destination}")
+        self._running = False
+
+
+    def loop(self):
+        self._running = True
+        with self.socket:
+            self.logger.info(f"Connected with {self.destination}")
+            while self._running:
+                self.receiveMessage()
+                self.sendMessage()
+                
+
+    def sendMessage(self):
+        if not self.txQueue.isEmpty():
+            msg = self.txQueue.pop()
+            self.logger.info(f"SEND ({self.destination[1]}): {msg.data}")
+            self.logger.debug(f"tx: {msg.toBytes()}")
+            self.socket.sendall(msg.toBytes())
+
+    def receiveMessage(self):
+        while True:  # receive complete message
             if not self.txQueue.isEmpty():
-                msg = self.txQueue.pop()
-                self.logger.info(f"SEND ({self.destination[1]}): {msg.data}")
-                self.logger.debug(f"tx: {msg.toBytes()}")
-                self.socket.sendall(msg.toBytes())
+                break
 
-        def receiveMessage(self):
-            while True:  # receive complete message
-                if not self.txQueue.isEmpty():
-                    break
+            try:
+                data = self.socket.recv(255)
+                if not data:
+                    self.closeConnection()
+                    return
 
-                try:
-                    data = self.socket.recv(255)
-                    if not data:
-                        self.closeConnection()
-                        return
+                msg = Message(data) # TODO: check if message is complete
+                self.processData(msg)
+                break
+            except BlockingIOError:
+                time.sleep(0.5)
 
-                    msg = Message(data) # TODO: check if message is complete
-                    self.processData(msg)
-                    break
-                except BlockingIOError:
-                    time.sleep(0.5)
+    def forwardMessage(self, msg: Message):
+        self.txQueue.put(msg)
 
-        def forwardMessage(self, msg: Message):
+    def processData(self, msg: Message):
+        if msg.data == b"close":
+            self.closeConnection()
+            return
+
+        self.logger.debug(f"rx: {msg.toBytes()}")
+        self.logger.info(f"RECV ({self.destination[1]}): {msg.data}")
+        if msg.type == Message.Type.BROADCAST:
+            self.logger.debug("Received broadcast")
+            self.node.broadcastMessage(msg)
+        else:
             self.txQueue.put(msg)
 
-        def processData(self, msg: Message):
-            if msg.data == b"close":
-                self.closeConnection()
-                return
-
-            self.logger.debug(f"rx: {msg.toBytes()}")
-            self.logger.info(f"RECV ({self.destination[1]}): {msg.data}")
-            if msg.type == Message.Type.BROADCAST:
-                self.logger.debug("Received broadcast")
-                self.node.broadcastMessage(msg)
-            else:
-                self.txQueue.put(msg)
-
-
+class Node:
     def __init__(self, name: str):
-        self.connections = dict[int, self.Connection]()
+        self.connections = dict[int, Connection]()
         self.name = name
-        self.server = self.prepareServer()
+        self.socketServer = self.prepareSocketServer()
         self.logger = self.prepareLogger()
+        self.webServer = HTTPServer(self, self.logger)
         self.broadcastedMessages = set[int]()
         self._connId = self.connectionIDGenerator()
 
     def prepareLogger(self):
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.DEBUG)
+        webLogger = logging.getLogger("uvicorn.error")
+        webLogger.setLevel(logging.DEBUG)
+
         formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%m/%d/%Y %I:%M:%S")
 
         consoleHandler = logging.StreamHandler()
         consoleHandler.setFormatter(formatter)
         consoleHandler.setLevel(logging.INFO)
 
-        logFilename = f"server_{self.name}_{str(self.server.getsockname()[1])}.log"
+        logFilename = f"server_{self.name}_{str(self.socketServer.getsockname()[1])}.log"
         fileHandler = logging.FileHandler(logFilename, encoding="utf-8")
         fileHandler.setFormatter(formatter)
         fileHandler.setLevel(logging.DEBUG)
 
-        logger.addHandler(consoleHandler)
-        logger.addHandler(fileHandler)
-        return logger
+        webLogger.addHandler(consoleHandler)
+        webLogger.addHandler(fileHandler)
+        return webLogger
 
-
-    def prepareServer(self):
+    def prepareSocketServer(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("localhost", 0))
         server.listen()
@@ -185,17 +230,10 @@ class Node:
 
     def createConnection(self, conn: socket.socket, addr):
         id = next(self._connId)
-        connection = self.Connection(conn, addr, id, self)
+        connection = Connection(conn, addr, id, self)
         self.connections[id] = connection
         connThread = threading.Thread(target=connection.loop)
         connThread.start()
-
-    def listenForConnections(self):
-        self.logger.info(f"Start server {self.name} on port: {self.server.getsockname()[1]}")
-        with self.server as s:
-            while True:  # wait for connections, some sane upper limit can be applied
-                conn, addr = s.accept()
-                self.createConnection(conn, addr)
 
     def connect(self, ports: list[int]):
         self.logger.warning(ports)
@@ -208,6 +246,25 @@ class Node:
             except ConnectionRefusedError:
                 self.logger.info(f"Couldn't connect with {address}")
 
+    def runSocketServer(self):
+        def listenForConnections():
+            self.logger.info(f"Start socket server {self.name} on port: {self.socketServer.getsockname()[1]}")
+            with self.socketServer as s:
+                while True:  # wait for connections, some sane upper limit can be applied
+                    conn, addr = s.accept()
+                    self.createConnection(conn, addr)
+
+        socketServerThread = threading.Thread(target=listenForConnections)
+        socketServerThread.start()
+
+    def runWebServer(self):
+        self.webServer.addAppRoutes()
+        self.webServer.run()
+
+
+    def run(self):
+        self.runSocketServer()
+        self.runWebServer()
 
 
 def parseArgs() -> argparse.Namespace:
@@ -222,7 +279,7 @@ def main():
     node = Node(args.name)
     if args.join:
         node.connect(args.join)
-    node.listenForConnections()
+    node.run()
 
 
 if __name__ == "__main__":
