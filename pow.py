@@ -2,9 +2,12 @@ import hashlib
 import json
 import time
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
-from typing import List
+from typing import List, Union, Optional
+
+from pydantic import BaseModel
 
 from wallet import get_public_key_from_seed, sign_data
+
 
 # Constants
 DIFFICULTY = "0000"
@@ -14,6 +17,12 @@ def sha256(data):
 
 
 class Transaction:
+    class Model(BaseModel):
+        sender: str
+        recipient: str
+        amount: str
+        seed: str
+
     """Represents a blockchain transaction."""
     def __init__(self, sender, recipient, amount):
         self.sender = sender        # Public key of the sender
@@ -69,6 +78,21 @@ class Transaction:
     def __str__(self):
         return json.dumps(self.as_dict(), indent=4)
 
+    def toBytes(self) -> bytes:
+        return str(self).encode()
+
+    @classmethod
+    def fromBytes(cls, data: Union[bytes, dict]):
+        if isinstance(data, dict):
+            jsonDict = data
+        else:
+            jsonDict = json.loads(data)
+
+        transaction = cls(jsonDict["sender"], jsonDict["recipient"], jsonDict["amount"])
+        transaction.timestamp = jsonDict["timestamp"]
+        transaction.signature = jsonDict["signature"]
+        transaction.hash = jsonDict["hash"]
+        return transaction
 
 class Block:
     def __init__(self, index, previous_hash, transactions: List[Transaction]):
@@ -110,10 +134,41 @@ class Block:
 
         return True
 
+    def as_dict(self):
+        """Return a dictionary representation of the transaction."""
+        return {
+            "index": self.index,
+            "previous_hash": self.previous_hash,
+            "transactions": [x.as_dict() for x in self.transactions],
+            "timestamp": self.timestamp,
+            "nonce": self.nonce,
+            "hash": self.hash
+        }
+
+    def __str__(self):
+        return json.dumps(self.as_dict(), indent=4)
+
+    def toBytes(self) -> bytes:
+        return str(self).encode()
+
+    @classmethod
+    def fromBytes(cls, data: Union[bytes, dict]):
+        if isinstance(data, dict):
+            jsonDict = data
+        else:
+            jsonDict = json.loads(data)
+
+        transactions = [Transaction.fromBytes(x) for x in jsonDict["transactions"]]
+        block = cls(jsonDict["index"], jsonDict["previous_hash"], transactions)
+        block.timestamp = jsonDict["timestamp"]
+        block.nonce = jsonDict["nonce"]
+        block.hash = jsonDict["hash"]
+        return block
+
 
 class Blockchain:
-    def __init__(self,miners_address):
-        self.chain = [self.create_genesis_block()]
+    def __init__(self,miners_address, blocks: Optional[list[Block]] = None):
+        self.chain = [self.create_genesis_block()] if not blocks else blocks
         self.pending_transactions: List[Transaction] = []
         self.miners_address=miners_address
 
@@ -205,6 +260,31 @@ class Blockchain:
             print(f"  Hash: {block.hash}")
             print(f"  Previous Hash: {block.previous_hash}")
             print(f"  Nonce: {block.nonce}\n")
+
+    def as_dict(self):
+        """Return a dictionary representation of the transaction."""
+        return {
+            "chain": [x.as_dict() for x in self.chain],
+        }
+
+    def __str__(self):
+        return json.dumps(self.as_dict(), indent=4)
+
+    def toBytes(self) -> bytes:
+        return str(self).encode()
+
+    def appendBlocksFromBytes(self, data: bytes):
+        jsonDict = json.loads(data)
+        blocks = [Block.fromBytes(x) for x in jsonDict["chain"]]
+        # TODO: validate blocks
+        self.chain.extend(blocks)
+
+    @classmethod
+    def fromBytes(cls, data: bytes):
+        jsonDict = json.loads(data)
+        blocks = [Block.fromBytes(x) for x in jsonDict["chain"]]
+        return cls(blocks)
+
 
 # Example Usage
 if __name__ == "__main__":
