@@ -1,2 +1,3 @@
-py2p
 fastapi[all]
+ecdsa
+cryptography
