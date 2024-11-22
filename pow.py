@@ -179,6 +179,9 @@ class Blockchain:
     def get_latest_block(self):
         return self.chain[-1]
 
+    def get_pending_transactions_count(self):
+        return len(self.pending_transactions)
+
     def add_transaction(self, transaction:Transaction):
         """Add a new transaction to the list of pending transactions after verification"""
         if transaction.verify_signature() and self.is_ammount_valid(transaction):
