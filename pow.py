@@ -10,7 +10,6 @@ from wallet import get_public_key_from_seed, sign_data
 DIFFICULTY = "0000"
 
 def sha256(data):
-    """Generate a SHA-256 hash for the given data."""
     return hashlib.sha256(data.encode()).hexdigest()
 
 
@@ -40,15 +39,18 @@ class Transaction:
 
     def verify_signature(self):
         """Verify the transaction's signature using the sender's public key."""
+        if self.sender=="system":
+            return True
         if not self.signature:
             raise ValueError("Transaction is not signed.")
         if not self.sender:
             raise ValueError("Sender public key is missing.")
         
+        
         try:
             vk = VerifyingKey.from_string(bytes.fromhex(self.sender), curve=SECP256k1)
             result = vk.verify(bytes.fromhex(self.signature['signature']), self.hash.encode())
-            return vk.verify(bytes.fromhex(self.signature['signature']), self.hash.encode())
+            return result
         
         except BadSignatureError:
             return False
@@ -85,61 +87,72 @@ class Block:
 
     def mine_block(self):
         """Mine the block by finding a hash that starts with the target difficulty."""
-        while not self.hash.startswith(DIFFICULTY): #Actual proof of work
+        while not self.hash.startswith(DIFFICULTY): 
             self.nonce += 1
             self.hash = self.generate_hash()
         print(f"Block mined: {self.hash}")
 
     def verify_transactions(self):
-        """Verify all transactions in the block."""
+        reward_transaction_count = 0  # Counter for reward transactions
+
         for transaction in self.transactions:
-            if not transaction.verify_signature():
-                return False
+            if transaction.sender == "system":
+                reward_transaction_count += 1
+                # Reject block if multiple reward transactions are found
+                if reward_transaction_count > 1:
+                    print("Invalid block: Multiple miner reward transactions detected.")
+                    return False
+            else:
+                # Verify signature for non-reward transactions
+                if not transaction.verify_signature():
+                    print("Invalid transaction: Signature verification failed.")
+                    return False
+
         return True
 
 
 class Blockchain:
-    def __init__(self):
+    def __init__(self,miners_address):
         self.chain = [self.create_genesis_block()]
-        self.pending_transactions = []
+        self.pending_transactions: List[Transaction] = []
+        self.miners_address=miners_address
 
-    def create_genesis_block(self):
+    def create_genesis_block(self): 
         """Create the first block (genesis block) in the chain."""
-        return Block(0, "0", [Transaction("genesis", "genesis", 0)])
+        return Block(0, "0", [Transaction("COINBASE", "system" , 2000000)])
 
     def get_latest_block(self):
         return self.chain[-1]
 
     def add_transaction(self, transaction:Transaction):
-        """Add a new transaction to the list of pending transactions."""
-        if transaction.verify_signature():
+        """Add a new transaction to the list of pending transactions after verification"""
+        if transaction.verify_signature() and self.is_ammount_valid(transaction):
             self.pending_transactions.append(transaction)
         else:
-            print("Transaction signature invalid. Transaction rejected.")
+            print("Transaction invalid. Transaction rejected.")
 
     def mine_block_on_blockchain(self):
         """Mine the pending transactions and reward the miner."""
-        if not self.pending_transactions:
-            print("No transactions to mine.")
-            return
+        #if not self.pending_transactions:
+        #    print("No transactions to mine.")
+        #    return
 
         # Reward transaction to the miner TODO:implement reward system
-        #reward_tx = Transaction(sender="system", recipient=miner_address, amount=50)
-        # No signature needed for reward transaction as it's a system-generated transaction
-        #self.pending_transactions.append(reward_tx)
-
         # Create a new block with all pending transactions
+        self.pending_transactions.append(Transaction(sender="system", recipient=self.miners_address, amount=100))
         new_block = Block(len(self.chain), self.get_latest_block().hash, self.pending_transactions)
         new_block.mine_block()
 
         # Add the block to the chain and reset pending transactions
         if new_block.verify_transactions():
             self.chain.append(new_block)
-            self.pending_transactions = []
+            self.pending_transactions = [] 
             #print(f"Block mined and added to chain. Miner rewarded with 50 coins.")
         else:
             print("Block contains invalid transactions. Block rejected.")
 
+    def to_json(self):
+        return json.dumps(self.chain)
 
     def is_chain_valid(self):
         """Validate the entire blockchain."""
@@ -161,6 +174,28 @@ class Blockchain:
 
         return True
 
+    def is_ammount_valid(self, transaction:Transaction):
+        total = 0
+        if transaction.recipient == transaction.sender:
+            return False
+        for block in self.chain:
+            for t in block.transactions:
+                if t.recipient == transaction.sender: #check if sender recieved coins
+                    total += t.amount
+                if t.sender == transaction.sender: #check if sender sent coins
+                    total -= t.amount
+        if total < transaction.amount:
+            return False
+        for t in self.pending_transactions: #check doublespent
+            if t.recipient == transaction.sender: 
+                total += t.amount
+            if t.sender == transaction.sender: 
+                total -= t.amount
+        if total < 0:
+            return False
+        else:
+            return True
+
     def display_chain(self):
         """Display the entire blockchain."""
         for block in self.chain:
@@ -171,25 +206,26 @@ class Blockchain:
             print(f"  Previous Hash: {block.previous_hash}")
             print(f"  Nonce: {block.nonce}\n")
 
-
 # Example Usage
 if __name__ == "__main__":
     # Generate keys for sender and recipient using your seed-based function
-    sender_public_key = get_public_key_from_seed("my_secure_seed", 0)
+    miner_public_key = get_public_key_from_seed("my_secure_seed", 0)
 
     recipient_public_key = get_public_key_from_seed("recipient_seed", 0)
 
     # Print the generated keys for demonstration
-    print(f"Sender Public Key: {sender_public_key}")
+    print(f"Sender Public Key: {miner_public_key}")
     print(f"Recipient Public Key: {recipient_public_key}")
 
-    # Create a blockchain
-    blockchain = Blockchain()
+    # Create a blockchain with miner
+    blockchain = Blockchain(miner_public_key)
     print("Added block 0")
     blockchain.display_chain()
-
+    blockchain.mine_block_on_blockchain()
+    blockchain.display_chain()
+    
     # Create a new transaction
-    tx1 = Transaction(sender=sender_public_key, recipient=recipient_public_key, amount=100)
+    tx1 = Transaction(sender=miner_public_key, recipient=recipient_public_key, amount=10)
     signtx1=sign_data("my_secure_seed", tx1.hash)
     tx1.signature=signtx1
     # Add the transaction to the blockchain
@@ -203,7 +239,7 @@ if __name__ == "__main__":
     print("\nBlockchain validation:", blockchain.is_chain_valid())
     blockchain.display_chain()
 
-    tx2 = Transaction(sender=sender_public_key, recipient=recipient_public_key, amount=500)
+    tx2 = Transaction(sender=miner_public_key, recipient=recipient_public_key, amount=100)
     signtx2=sign_data("my_secure_seed", tx2.hash)
     tx2.signature=signtx2
     # Add the transaction to the blockchain
