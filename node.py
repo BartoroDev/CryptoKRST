@@ -14,7 +14,9 @@ import uvicorn
 from pow import Transaction, Block, Blockchain
 from wallet import sign_data
 
-TRANSACTIONS_PER_BLOCK = 1
+TRANSACTIONS_PER_BLOCK = 2
+SIGN_SEED = "my_secure_seed"
+
 
 # ------------- PROTOCOL -------------
 
@@ -115,19 +117,25 @@ class HTTPServer:
     def addAppRoutes(self):
         # define all routes here
         self.app.add_api_route("/", self.hello, methods=["GET"])
+        self.app.add_api_route("/blockchain", self.get_blockchain, methods=["GET"])
         self.app.add_api_route("/transaction", self.add_transaction, methods=["POST"])
 
 
     def hello(self):
         return {"Hello": "World"}
 
+    def get_blockchain(self):
+        result = Blockchain.fromBytes(self.node.returnBlockchain())
+        return result.as_dict()
+
     def add_transaction(self, transaction: Transaction.Model):
         trans = Transaction(transaction.sender, transaction.recipient, transaction.amount)
+        trans.signature = sign_data(SIGN_SEED, trans.hash)
         if self.node.newTransaction(trans):
             result = "Transaction accepted"
         else:
             result = "Transaction rejected"
-        return {"result":result}
+        return {"result": result}
 
     def run(self):
         uvicorn.run(self.app, port=0, log_level="debug")
@@ -296,7 +304,6 @@ class Node:
         self.broadcastMessage(msg)
         with self._condition:
             try:
-                transaction.signature = sign_data("my_secure_seed", transaction.hash)
                 if self._blockchain.add_transaction(transaction):
                     self._condition.notify()
                     return True
