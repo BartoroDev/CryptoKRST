@@ -5,7 +5,7 @@ import logging
 import argparse
 from fastapi import FastAPI
 
-from typing import Optional
+from typing import Optional, Union
 from enum import Flag
 from zlib import adler32
 
@@ -47,34 +47,40 @@ class Message:
         def toBytes(self):
             return self.value.to_bytes()
 
-    def __init__(self, msg: bytes):
-        self._raw = msg
-        self.version = self.Version(msg[0])
-        self.type = self.Type(msg[1])
-        self.control = self.Control(msg[2])
-        self.hash = int.from_bytes(msg[3:7])
-        self.dataLength = int.from_bytes(msg[7:9])
-        if (self.dataLength > 0):
-            self.data = msg[9:]
+    def __init__(self, data: Union[str, bytes], *, version: Version = Version.VERSION_ONE, type: Type = Type.UNICAST, control: Control = Control.OTHER, hash: int = 0):
+        self.version = version
+        self.type = type
+        self.control = control
+        if isinstance(data, str):
+            self.data = data.encode()
         else:
-            self.data = bytes()
+            assert isinstance(data, bytes)
+            self.data = data
+
+        self.hash = adler32(self.data + time.ctime().encode()) if not hash else hash
+        self.dataLength = len(data)
+
 
     def toBytes(self) -> bytes:
         return self.version.toBytes() + self.type.toBytes() + self.control.toBytes() + self.hash.to_bytes(4) + self.dataLength.to_bytes(2, byteorder='big') + self.data
 
     @classmethod
-    def fromData(cls, data: str, version: Version, type: Type, control: Control = Control.OTHER):
-        dataLen = len(data)
-        print(data)
-        hash = adler32(data.encode() + time.ctime().encode())
-        raw = version.toBytes() + type.toBytes() + control.toBytes() + hash.to_bytes(4) + dataLen.to_bytes(2) + data.encode()
-        return cls(raw)
+    def fromBytes(cls, msg: bytes):
+        version = cls.Version(msg[0])
+        type = cls.Type(msg[1])
+        control = cls.Control(msg[2])
+        hash = int.from_bytes(msg[3:7])
+        dataLength = int.from_bytes(msg[7:9])
+        assert dataLength == len(msg[9:])
+        if dataLength > 0:
+            data = msg[9:].decode()
+        else:
+            data = ""
+        return cls(data, version=version, type=type, control=control, hash=hash)
 
     @classmethod
     def blockchainRequest(cls):
-        hash = adler32(time.ctime().encode())
-        raw = cls.Version.VERSION_ONE.toBytes() + cls.Type.UNICAST.toBytes() + cls.Control.BLOCKCHAIN_REQ.toBytes() + hash.to_bytes(4) + int(0).to_bytes(2) + "".encode()
-        return cls(raw)
+        return cls("", control=cls.Control.BLOCKCHAIN_REQ)
 
 
 
@@ -178,7 +184,7 @@ class Connection:
                     return
 
                 # TODO: check if message is complete, for long blockchain it will be required!
-                msg = Message(data)
+                msg = Message.fromBytes(data)
                 self.processData(msg)
                 break
             except BlockingIOError:
@@ -199,10 +205,10 @@ class Connection:
 
         self.logger.debug(f"rx: {msg.toBytes()}")
         self.logger.info(f"RECV ({self.destination[1]}): {msg.data}")
-        self.logger.warning(msg.data)
 
         if msg.control == Message.Control.BLOCKCHAIN_REQ:
-            result = Message.fromData(self.node.returnBlockchain().decode(), Message.Version.VERSION_ONE, Message.Type.UNICAST, Message.Control.BLOCKCHAIN_ANN)
+            blockchain_bytes = self.node.returnBlockchain()
+            result = Message(blockchain_bytes, control=Message.Control.BLOCKCHAIN_ANN)
             self.txQueue.put(result)
             return
 
@@ -240,9 +246,6 @@ class Node:
         self._blockchain = self.prepareBlockchain(peers)
 
     def prepareBlockchain(self, peers: Optional[list[int]]) -> Blockchain:
-        # if peers:
-        #     self.connect(peers)
-        # return Blockchain()
         if peers:
             self.connect(peers)
             blockchain_data = self.askForBlockchain()
@@ -289,7 +292,7 @@ class Node:
         return server
 
     def newTransaction(self, transaction: Transaction) -> bool:
-        msg = Message.fromData(transaction.toBytes().decode(), Message.Version.VERSION_ONE, Message.Type.BROADCAST, Message.Control.TRANSACTION_ANN)
+        msg = Message(transaction.toBytes(), type=Message.Type.BROADCAST, control=Message.Control.TRANSACTION_ANN)
         self.broadcastMessage(msg)
         with self._condition:
             try:
@@ -330,7 +333,6 @@ class Node:
         connThread.start()
 
     def connect(self, ports: list[int]):
-        self.logger.warning(ports)
         for port in ports:
             try:
                 cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
