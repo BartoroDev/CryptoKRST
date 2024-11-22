@@ -13,7 +13,7 @@ def parseArgs() -> argparse.Namespace:
 
 def main(port):
     msgId = 1
-    msg = Message.fromData("Connected", Message.Version.VERSION_ONE, Message.Type.UNICAST)
+    msg = Message("Connected")
     inputed = None
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect(("localhost", port))
@@ -29,7 +29,7 @@ def main(port):
             msgType = Message.Type.BROADCAST if inputed[:2] == "b!" else Message.Type.UNICAST
             if msgType == Message.Type.BROADCAST:
                 inputed = inputed[2:]
-            msg = Message.fromData(inputed, Message.Version.VERSION_ONE, msgType)
+            msg = Message(inputed, type=msgType)
 
 
 if __name__ == "__main__":
