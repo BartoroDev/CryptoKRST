@@ -18,9 +18,7 @@ def sha256(data):
 
 class Transaction:
     class Model(BaseModel):
-        sender: str
-        recipient: str
-        amount: str
+        amount: int
         seed: str
 
     """Represents a blockchain transaction."""
@@ -283,10 +281,10 @@ class Blockchain:
         self.chain.extend(blocks)
 
     @classmethod
-    def fromBytes(cls, data: bytes):
+    def fromBytes(cls, miners_address, data: bytes):
         jsonDict = json.loads(data)
         blocks = [Block.fromBytes(x) for x in jsonDict["chain"]]
-        return cls(blocks)
+        return cls(miners_address, blocks)
 
 
 # Example Usage

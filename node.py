@@ -4,6 +4,7 @@ import socket
 import logging
 import argparse
 from fastapi import FastAPI
+from copy import deepcopy
 
 from typing import Optional, Union
 from enum import Flag
@@ -11,11 +12,11 @@ from zlib import adler32
 
 import uvicorn
 
-from pow import Transaction, Block, Blockchain
-from wallet import sign_data
+from pow import Transaction, Blockchain
+from wallet import sign_data, get_public_key_from_seed
 
 TRANSACTIONS_PER_BLOCK = 2
-SIGN_SEED = "my_secure_seed"
+MY_SECURE_SEED = "my_secure_seed"
 
 
 # ------------- PROTOCOL -------------
@@ -118,19 +119,31 @@ class HTTPServer:
         # define all routes here
         self.app.add_api_route("/", self.hello, methods=["GET"])
         self.app.add_api_route("/blockchain", self.get_blockchain, methods=["GET"])
+        self.app.add_api_route("/public_key", self.get_public_key, methods=["GET"])
+        self.app.add_api_route("/transactions", self.get_transactions, methods=["GET"])
         self.app.add_api_route("/transaction", self.add_transaction, methods=["POST"])
-
 
     def hello(self):
         return {"Hello": "World"}
 
     def get_blockchain(self):
-        result = Blockchain.fromBytes(self.node.returnBlockchain())
+        result = self.node.returnBlockchainObj()
         return result.as_dict()
 
+    def get_public_key(self):
+        return {"public_key":str(self.node.miner_public_key)}
+
+    def get_transactions(self):
+        transactions = self.node.returnAwaitingTransactions()
+        if not transactions:
+            return {"transactions": "empty"}
+        else:
+            return {str(id): x.as_dict() for id, x in enumerate(transactions)}
+
     def add_transaction(self, transaction: Transaction.Model):
-        trans = Transaction(transaction.sender, transaction.recipient, transaction.amount)
-        trans.signature = sign_data(SIGN_SEED, trans.hash)
+        recipent_public_key = get_public_key_from_seed(transaction.seed, 0)
+        trans = Transaction(self.node.miner_public_key, recipent_public_key, transaction.amount)
+        trans.signature = sign_data(MY_SECURE_SEED, trans.hash)
         if self.node.newTransaction(trans):
             result = "Transaction accepted"
         else:
@@ -215,7 +228,7 @@ class Connection:
         self.logger.info(f"RECV ({self.destination[1]}): {msg.data}")
 
         if msg.control == Message.Control.BLOCKCHAIN_REQ:
-            blockchain_bytes = self.node.returnBlockchain()
+            blockchain_bytes = self.node.returnBlockchainBytes()
             result = Message(blockchain_bytes, control=Message.Control.BLOCKCHAIN_ANN)
             self.txQueue.put(result)
             return
@@ -223,6 +236,11 @@ class Connection:
         if msg.control == Message.Control.BLOCKCHAIN_ANN:
             with self._lock:
                 self.response = msg.data
+            return
+
+        if msg.Control == Message.Control.BLOCKCHAIN_ANN:
+            trans = Transaction.fromBytes(msg.data)
+            self.node.newTransaction(trans)
             return
 
         if msg.type != Message.Type.BROADCAST:
@@ -251,15 +269,16 @@ class Node:
         self.broadcastedMessages = set[int]()
         self._connId = self.connectionIDGenerator()
         self._condition = threading.Condition()
+        self.miner_public_key = get_public_key_from_seed(MY_SECURE_SEED, 0)
         self._blockchain = self.prepareBlockchain(peers)
 
     def prepareBlockchain(self, peers: Optional[list[int]]) -> Blockchain:
         if peers:
             self.connect(peers)
             blockchain_data = self.askForBlockchain()
-            return Blockchain.fromBytes(blockchain_data)
+            return Blockchain.fromBytes(self.miner_public_key, blockchain_data)
         else:
-            return Blockchain()
+            return Blockchain(self.miner_public_key)
 
     def askForBlockchain(self) -> bytes:
         results = []
@@ -269,10 +288,20 @@ class Node:
         # TODO: handle varying blockchains
         return results[0]
 
-    def returnBlockchain(self) -> bytes:
+    def returnBlockchainBytes(self) -> bytes:
         with self._condition:
             bc_bytes = self._blockchain.toBytes()
         return bc_bytes
+
+    def returnBlockchainObj(self) -> Blockchain:
+        with self._condition:
+            result = deepcopy(self._blockchain)
+        return result
+
+    def returnAwaitingTransactions(self):
+        with self._condition:
+            transactions = deepcopy(self._blockchain.pending_transactions)
+        return transactions
 
     def prepareLogger(self):
         webLogger = logging.getLogger("uvicorn.error")
