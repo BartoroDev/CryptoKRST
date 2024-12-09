@@ -304,10 +304,10 @@ class Node:
         return transactions
 
     def prepareLogger(self):
-        webLogger = logging.getLogger("uvicorn.error")
-        webLogger.setLevel(logging.DEBUG)
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
 
-        formatter = logging.Formatter("%(asctime)s %(message)s", datefmt="%m/%d/%Y %I:%M:%S")
+        formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%m/%d/%Y %I:%M:%S")
 
         consoleHandler = logging.StreamHandler()
         consoleHandler.setFormatter(formatter)
@@ -318,9 +318,10 @@ class Node:
         fileHandler.setFormatter(formatter)
         fileHandler.setLevel(logging.DEBUG)
 
-        webLogger.addHandler(consoleHandler)
-        webLogger.addHandler(fileHandler)
-        return webLogger
+        logger.addHandler(consoleHandler)
+        logger.addHandler(fileHandler)
+
+        return logger
 
     def prepareSocketServer(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
