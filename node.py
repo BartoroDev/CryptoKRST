@@ -12,7 +12,7 @@ from zlib import adler32
 
 import uvicorn
 
-from pow import Transaction, Blockchain
+from pow import Transaction, Blockchain, Block
 from wallet import sign_data, get_public_key_from_seed
 
 TRANSACTIONS_PER_BLOCK = 2
@@ -39,13 +39,12 @@ class Message:
     class Control(Flag):
         # *_REQ - request
         # *_ANN - announcement/response
-        TRANSACTION_REQ = 1
-        TRANSACTION_ANN = 2
-        BLOCK_REQ = 3
-        BLOCK_ANN = 4
-        BLOCKCHAIN_REQ = 5
-        BLOCKCHAIN_ANN = 6
-        OTHER = 7
+        TRANSACTION_ANN = 1
+        BLOCK_ANN = 2
+        BLOCKCHAIN_REQ = 3
+        BLOCKCHAIN_ANN = 4
+        ECHO = 5
+        OTHER = 6
 
         def toBytes(self):
             return self.value.to_bytes()
@@ -84,6 +83,18 @@ class Message:
     @classmethod
     def blockchainRequest(cls):
         return cls("", control=cls.Control.BLOCKCHAIN_REQ)
+
+    @classmethod
+    def blockchainAnnouncement(cls, data):
+        return cls(data, control=cls.Control.BLOCKCHAIN_ANN)
+
+    @classmethod
+    def blockAnnouncement(cls, data):
+        return cls(data, type=cls.Type.BROADCAST, control=cls.Control.BLOCK_ANN)
+
+    @classmethod
+    def transactionAnnouncement(cls, data):
+        return cls(data, type=cls.Type.BROADCAST, control=cls.Control.TRANSACTION_ANN)
 
 
 
@@ -141,9 +152,13 @@ class HTTPServer:
             return {str(id): x.as_dict() for id, x in enumerate(transactions)}
 
     def add_transaction(self, transaction: Transaction.Model):
-        recipent_public_key = get_public_key_from_seed(transaction.seed, 0)
-        trans = Transaction(self.node.miner_public_key, recipent_public_key, transaction.amount)
-        trans.signature = sign_data(MY_SECURE_SEED, trans.hash)
+        if transaction.sender == "system":
+            sender_public_key = "system"
+        else:
+            sender_public_key = get_public_key_from_seed(transaction.sender, 0)
+        recipent_public_key = get_public_key_from_seed(transaction.recipient, 0)
+        trans = Transaction(sender_public_key, recipent_public_key, transaction.amount)
+        trans.signature = sign_data(transaction.sender, trans.hash)
         if self.node.newTransaction(trans):
             result = "Transaction accepted"
         else:
@@ -151,7 +166,7 @@ class HTTPServer:
         return {"result": result}
 
     def run(self):
-        uvicorn.run(self.app, port=0, log_level="debug")
+        uvicorn.run(self.app, port=0, log_level=logging.INFO)
 
 
 # ------------- SOCKET SERVER / NODE -------------
@@ -229,7 +244,7 @@ class Connection:
 
         if msg.control == Message.Control.BLOCKCHAIN_REQ:
             blockchain_bytes = self.node.returnBlockchainBytes()
-            result = Message(blockchain_bytes, control=Message.Control.BLOCKCHAIN_ANN)
+            result = Message.blockchainAnnouncement(blockchain_bytes)
             self.txQueue.put(result)
             return
 
@@ -238,12 +253,17 @@ class Connection:
                 self.response = msg.data
             return
 
-        if msg.Control == Message.Control.BLOCKCHAIN_ANN:
+        if msg.control == Message.Control.TRANSACTION_ANN:
             trans = Transaction.fromBytes(msg.data)
             self.node.newTransaction(trans)
             return
 
-        if msg.type != Message.Type.BROADCAST:
+        if msg.control == Message.Control.BLOCK_ANN:
+            block = Block.fromBytes(msg.data)
+            self.node.receivedBlock(block)
+            return
+
+        if msg.control == Message.Control.ECHO:
             self.txQueue.put(msg)
 
     def askForBlockchain(self) -> bytes:
@@ -330,7 +350,7 @@ class Node:
         return server
 
     def newTransaction(self, transaction: Transaction) -> bool:
-        msg = Message(transaction.toBytes(), type=Message.Type.BROADCAST, control=Message.Control.TRANSACTION_ANN)
+        msg = Message.transactionAnnouncement(transaction.toBytes())
         self.broadcastMessage(msg)
         with self._condition:
             try:
@@ -341,6 +361,13 @@ class Node:
                     return False
             except ValueError:
                 return False
+
+    def receivedBlock(self, block: Block):
+        if self._blockchain.try_add_block(block):
+            self.logger.info("Received correct block")
+            # TODO: get reward for block verification
+        else:
+            self.logger.warning(f"Received incorrect block:\n{block}")
 
     def broadcastMessage(self, msg: Message):
         if msg.hash not in self.broadcastedMessages:
@@ -398,7 +425,9 @@ class Node:
         with self._condition:
             while True:
                 if self._blockchain.get_pending_transactions_count() == TRANSACTIONS_PER_BLOCK:
-                    self._blockchain.mine_block_on_blockchain()
+                    if self._blockchain.mine_block_on_blockchain():
+                        msg = Message.blockAnnouncement(self._blockchain.get_latest_block().toBytes())
+                        self.broadcastMessage(msg)
                 else:
                     self._condition.wait()
 

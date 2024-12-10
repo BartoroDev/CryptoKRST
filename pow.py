@@ -18,8 +18,9 @@ def sha256(data):
 
 class Transaction:
     class Model(BaseModel):
+        sender: str
+        recipient: str
         amount: int
-        seed: str
 
     """Represents a blockchain transaction."""
     def __init__(self, sender, recipient, amount):
@@ -52,8 +53,7 @@ class Transaction:
             raise ValueError("Transaction is not signed.")
         if not self.sender:
             raise ValueError("Sender public key is missing.")
-        
-        
+
         try:
             vk = VerifyingKey.from_string(bytes.fromhex(self.sender), curve=SECP256k1)
             result = vk.verify(bytes.fromhex(self.signature['signature']), self.hash.encode())
@@ -107,18 +107,23 @@ class Block:
         block_content = f"{self.index}{self.previous_hash}{transactions_data}{self.timestamp}{self.nonce}"
         return sha256(block_content)
 
-    def mine_block(self):
+    def mine_block(self, bc: "Blockchain"):
         """Mine the block by finding a hash that starts with the target difficulty."""
-        while not self.hash.startswith(DIFFICULTY): 
+        bc.mining_active = True
+        while not self.hash.startswith(DIFFICULTY) and bc.mining_active:
             self.nonce += 1
             self.hash = self.generate_hash()
-        print(f"Block mined: {self.hash}")
+        if self.hash.startswith(DIFFICULTY):
+            print(f"Block mined: {self.hash}")
+            return True
+        else:
+            return False
 
-    def verify_transactions(self):
+    def verify_transactions(self, miner_address):
         reward_transaction_count = 0  # Counter for reward transactions
 
         for transaction in self.transactions:
-            if transaction.sender == "system":
+            if transaction.sender == "system" and transaction.recipient == miner_address:
                 reward_transaction_count += 1
                 # Reject block if multiple reward transactions are found
                 if reward_transaction_count > 1:
@@ -169,6 +174,7 @@ class Blockchain:
         self.chain = [self.create_genesis_block()] if not blocks else blocks
         self.pending_transactions: List[Transaction] = []
         self.miners_address=miners_address
+        self.mining_active
 
     def create_genesis_block(self): 
         """Create the first block (genesis block) in the chain."""
@@ -184,28 +190,44 @@ class Blockchain:
         """Add a new transaction to the list of pending transactions after verification"""
         if transaction.verify_signature() and self.is_ammount_valid(transaction):
             self.pending_transactions.append(transaction)
+            return True
         else:
             print("Transaction invalid. Transaction rejected.")
+            return False
+
+    def append_block(self, block: Block, verify: bool = True):
+        if verify:
+            # TODO: shouldn't this check be done before mining block?
+            result = block.verify_transactions(self.miners_address)
+        else:
+            result = True
+
+        if result:
+            block.verify_transactions(self.miners_address)
+            self.chain.append(block)
+            self.pending_transactions = []
+            return True
+        else:
+            print("Block contains invalid transactions")
+            return False
 
     def mine_block_on_blockchain(self):
         """Mine the pending transactions and reward the miner."""
-        #if not self.pending_transactions:
-        #    print("No transactions to mine.")
-        #    return
 
-        # Reward transaction to the miner TODO:implement reward system
         # Create a new block with all pending transactions
         self.pending_transactions.append(Transaction(sender="system", recipient=self.miners_address, amount=100))
         new_block = Block(len(self.chain), self.get_latest_block().hash, self.pending_transactions)
-        new_block.mine_block()
+        block_mined = new_block.mine_block(self)
 
         # Add the block to the chain and reset pending transactions
-        if new_block.verify_transactions():
-            self.chain.append(new_block)
-            self.pending_transactions = [] 
-            #print(f"Block mined and added to chain. Miner rewarded with 50 coins.")
+        if block_mined:
+            self.append_block(new_block)
         else:
-            print("Block contains invalid transactions. Block rejected.")
+            print("Block mining failed.")
+        self.mining_active = False
+
+    def interrupt_mining(self):
+        self.mining_active = False
 
     def to_json(self):
         return json.dumps(self.chain)
@@ -225,12 +247,13 @@ class Blockchain:
                 return False
 
             # Validate transactions
-            if not current_block.verify_transactions():
+            if not current_block.verify_transactions(self.miners_address):
                 return False
 
         return True
 
     def is_ammount_valid(self, transaction:Transaction):
+        # TODO: store actual wallets balance in a hashmap and update it on every transaction instead of calculating this every time
         total = 0
         if transaction.recipient == transaction.sender:
             return False
@@ -251,6 +274,23 @@ class Blockchain:
             return False
         else:
             return True
+
+    def try_add_block(self, block: Block) -> bool:
+        if block.previous_hash == self.get_latest_block().hash:
+            if not self.mining_active:
+                print("Miners not mining!")
+                return False
+
+            for transaction in block.transactions:
+                if transaction not in self.pending_transactions:
+                    print(f"Transaction in proposed block not recognized!\n{transaction}")
+                    return False
+
+            self.interrupt_mining()
+            return self.append_block(block, False)
+        else:
+            print("Received invalid block")
+            return False
 
     def display_chain(self):
         """Display the entire blockchain."""
@@ -273,12 +313,6 @@ class Blockchain:
 
     def toBytes(self) -> bytes:
         return str(self).encode()
-
-    def appendBlocksFromBytes(self, data: bytes):
-        jsonDict = json.loads(data)
-        blocks = [Block.fromBytes(x) for x in jsonDict["chain"]]
-        # TODO: validate blocks
-        self.chain.extend(blocks)
 
     @classmethod
     def fromBytes(cls, miners_address, data: bytes):
