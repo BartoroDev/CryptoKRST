@@ -13,10 +13,9 @@ from zlib import adler32
 import uvicorn
 
 from pow import Transaction, Blockchain, Block
-from wallet import sign_data, get_public_key_from_seed
+from wallet import get_public_key_from_pk
 
 TRANSACTIONS_PER_BLOCK = 2
-MY_SECURE_SEED = "my_secure_seed"
 
 
 # ------------- PROTOCOL -------------
@@ -142,7 +141,7 @@ class HTTPServer:
         return result.as_dict()
 
     def get_public_key(self):
-        return {"public_key":str(self.node.miner_public_key)}
+        return {"public_key":str(get_public_key_from_pk(self.node.wallet_key))}
 
     def get_transactions(self):
         transactions = self.node.returnAwaitingTransactions()
@@ -152,13 +151,10 @@ class HTTPServer:
             return {str(id): x.as_dict() for id, x in enumerate(transactions)}
 
     def add_transaction(self, transaction: Transaction.Model):
-        if transaction.sender == "system":
-            sender_public_key = "system"
-        else:
-            sender_public_key = get_public_key_from_seed(transaction.sender, 0)
-        recipent_public_key = get_public_key_from_seed(transaction.recipient, 0)
-        trans = Transaction(sender_public_key, recipent_public_key, transaction.amount)
-        trans.signature = sign_data(transaction.sender, trans.hash)
+        trans = Transaction(transaction.sender, transaction.recipient, transaction.amount)
+        trans.timestamp = transaction.timestamp
+        trans.signature = transaction.signature
+        trans.hash = transaction.hash
         if self.node.newTransaction(trans):
             result = "Transaction accepted"
         else:
@@ -280,7 +276,9 @@ class Connection:
         return result
 
 class Node:
-    def __init__(self, name: str, peers: Optional[list[int]]):
+    def __init__(self, name: str, peers: Optional[list[int]], pk:str):
+        self.peers=peers
+        self.wallet_key=pk
         self.connections = dict[int, Connection]()
         self.name = name
         self.socketServer = self.prepareSocketServer()
@@ -289,16 +287,16 @@ class Node:
         self.broadcastedMessages = set[int]()
         self._connId = self.connectionIDGenerator()
         self._condition = threading.Condition()
-        self.miner_public_key = get_public_key_from_seed(MY_SECURE_SEED, 0)
-        self._blockchain = self.prepareBlockchain(peers)
+        self._blockchain = None
 
     def prepareBlockchain(self, peers: Optional[list[int]]) -> Blockchain:
+        miner_public_key = get_public_key_from_pk(self.wallet_key)
         if peers:
             self.connect(peers)
             blockchain_data = self.askForBlockchain()
-            return Blockchain.fromBytes(self.miner_public_key, blockchain_data)
+            return Blockchain.fromBytes(miner_public_key, blockchain_data)
         else:
-            return Blockchain(self.miner_public_key)
+            return Blockchain(miner_public_key)
 
     def askForBlockchain(self) -> bytes:
         results = []
@@ -432,16 +430,20 @@ class Node:
                     self._condition.wait()
 
     def runMiner(self):
+        self._blockchain = self.prepareBlockchain(self.peers)
         miner_thread = threading.Thread(target=self.minerLoop)
         miner_thread.start()
 
     def run(self):
-        self.runMiner()
+        if self.wallet_key != "":
+            self.runMiner()
         self.runSocketServer()
         self.runWebServer()
 
 def parseArgs() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--wallet_key", default="7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7", type=str)
+    #parser.add_argument("--wallet_key", default="", type=str)
     parser.add_argument("--name", default="A", type=str)
     parser.add_argument("--join", nargs="*", type=int)
     return parser.parse_args()
@@ -449,7 +451,7 @@ def parseArgs() -> argparse.Namespace:
 
 def main():
     args = parseArgs()
-    node = Node(args.name, args.join)
+    node = Node(args.name, args.join, args.wallet_key)
     node.run()
 
 

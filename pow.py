@@ -6,8 +6,6 @@ from typing import List, Union, Optional
 
 from pydantic import BaseModel
 
-from wallet import get_public_key_from_seed, sign_data
-
 
 # Constants
 DIFFICULTY = "0000"
@@ -21,13 +19,16 @@ class Transaction:
         sender: str
         recipient: str
         amount: int
+        timestamp:int
+        signature:str
+        hash:str
 
     """Represents a blockchain transaction."""
     def __init__(self, sender, recipient, amount):
         self.sender = sender        # Public key of the sender
         self.recipient = recipient  # Public key of the recipient
         self.amount = amount        # Amount to be transferred
-        self.timestamp = time.time()
+        self.timestamp = round(time.time())
         self.signature = None       # Signature will be added later
         self.hash = self.generate_hash()
 
@@ -56,7 +57,7 @@ class Transaction:
 
         try:
             vk = VerifyingKey.from_string(bytes.fromhex(self.sender), curve=SECP256k1)
-            result = vk.verify(bytes.fromhex(self.signature['signature']), self.hash.encode())
+            result = vk.verify(bytes.fromhex(self.signature), self.hash.encode())
             return result
         
         except BadSignatureError:
@@ -174,7 +175,6 @@ class Blockchain:
         self.chain = [self.create_genesis_block()] if not blocks else blocks
         self.pending_transactions: List[Transaction] = []
         self.miners_address=miners_address
-        self.mining_active
 
     def create_genesis_block(self): 
         """Create the first block (genesis block) in the chain."""
@@ -188,7 +188,7 @@ class Blockchain:
 
     def add_transaction(self, transaction:Transaction):
         """Add a new transaction to the list of pending transactions after verification"""
-        if transaction.verify_signature() and self.is_ammount_valid(transaction):
+        if transaction.verify_signature(): #and self.is_ammount_valid(transaction):  #TODO verify the ammount!!!
             self.pending_transactions.append(transaction)
             return True
         else:
@@ -323,10 +323,11 @@ class Blockchain:
 
 # Example Usage
 if __name__ == "__main__":
-    # Generate keys for sender and recipient using your seed-based function
-    miner_public_key = get_public_key_from_seed("my_secure_seed", 0)
+    pass
+    """ # Generate keys for sender and recipient using your seed-based function
+    miner_public_key = get_public_key_from_pk("7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7")
 
-    recipient_public_key = get_public_key_from_seed("recipient_seed", 0)
+    recipient_public_key = get_public_key_from_pk("recipient_seed")
 
     # Print the generated keys for demonstration
     print(f"Sender Public Key: {miner_public_key}")
@@ -366,4 +367,4 @@ if __name__ == "__main__":
 
     # Display the blockchain
     print("\nBlockchain validation:", blockchain.is_chain_valid())
-    blockchain.display_chain()
+    blockchain.display_chain() """
