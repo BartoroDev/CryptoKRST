@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 # Constants
 DIFFICULTY = "0000"
+TRANSACTIONS_PER_BLOCK = 2
 
 def sha256(data):
     return hashlib.sha256(data.encode()).hexdigest()
@@ -48,7 +49,7 @@ class Transaction:
 
     def verify_signature(self):
         """Verify the transaction's signature using the sender's public key."""
-        if self.sender=="system":
+        if self.sender=="system" and self.amount==int(100/len(DIFFICULTY)):
             return True
         if not self.signature:
             raise ValueError("Transaction is not signed.")
@@ -177,31 +178,86 @@ class Blockchain:
         self.miners_address=miners_address
 
     def create_genesis_block(self): 
-        """Create the first block (genesis block) in the chain."""
-        return Block(0, "0", [Transaction("COINBASE", "system" , 2000000)])
+        coinbase_message = "Mon Dec 16 2024 21:00:00 GMT+0000"
+        reward = 2000000
+
+        coinbase_transaction = Transaction("COINBASE", "system", reward)
+        coinbase_transaction.signature = coinbase_message  
+        coinbase_transaction.timestamp = 1734382800  # same as in message
+        coinbase_transaction.hash=coinbase_transaction.generate_hash()
+        transactions = [coinbase_transaction]
+
+        genesis_block = Block(0, "0000", transactions)
+        genesis_block.timestamp = 1734382800  # same as in message
+        genesis_block.nonce = 0
+
+        while not genesis_block.hash.startswith(DIFFICULTY):
+            genesis_block.nonce += 1
+            genesis_block.hash = genesis_block.generate_hash()
+
+        return genesis_block
 
     def get_latest_block(self):
         return self.chain[-1]
 
-    def get_pending_transactions_count(self):
-        return len(self.pending_transactions)
+    def max_transactions_per_block(self):
+        if len(self.pending_transactions) < TRANSACTIONS_PER_BLOCK:
+            return False
+        else:
+            return True
 
     def add_transaction(self, transaction:Transaction):
         """Add a new transaction to the list of pending transactions after verification"""
-        if transaction.verify_signature(): #and self.is_ammount_valid(transaction):  #TODO verify the ammount!!!
+        if self.verify_full(transaction): 
             self.pending_transactions.append(transaction)
             return True
         else:
             print("Transaction invalid. Transaction rejected.")
             return False
+    
+    def verify_full(self, transaction:Transaction) -> bool:
+        if transaction.sender == "system":
+            return True  # Skip verification for reward transactions
+
+        if not transaction.verify_signature():
+            print("Transaction verification failed: Invalid signature.")
+            return False
+
+        # Step 2: Check sender balance
+        sender_balance = 0
+        for block in self.chain:
+            for t in block.transactions:
+                if t.recipient == transaction.sender:
+                    sender_balance += t.amount  # Add received amount
+                if t.sender == transaction.sender:
+                    sender_balance -= t.amount  # Subtract sent amount
+
+        for t in self.pending_transactions:  # Include pending transactions
+            if t.recipient == transaction.sender:
+                sender_balance += t.amount
+            if t.sender == transaction.sender:
+                sender_balance -= t.amount
+
+        if sender_balance < transaction.amount:
+            print(f"Transaction verification failed: Insufficient balance {sender_balance}. ammount {transaction.amount}")
+            return False
+
+        # Step 3: Check for double spending
+        for t in self.pending_transactions:
+            if t.hash == transaction.hash:
+                print("Transaction verification failed: Double spending detected.")
+                return False
+
+        print("Transaction verified successfully.")
+        return True
 
     def append_block(self, block: Block, verify: bool = True):
         if verify:
-            # TODO: shouldn't this check be done before mining block?
+            # TODO: this should be done when recieving a block 
             result = block.verify_transactions(self.miners_address)
         else:
             result = True
-
+            
         if result:
             block.verify_transactions(self.miners_address)
             self.chain.append(block)
@@ -215,13 +271,14 @@ class Blockchain:
         """Mine the pending transactions and reward the miner."""
 
         # Create a new block with all pending transactions
-        self.pending_transactions.append(Transaction(sender="system", recipient=self.miners_address, amount=100))
+        self.pending_transactions.append(Transaction(sender="system", recipient=self.miners_address, amount=int(100/len(DIFFICULTY))))
         new_block = Block(len(self.chain), self.get_latest_block().hash, self.pending_transactions)
         block_mined = new_block.mine_block(self)
-
+        
         # Add the block to the chain and reset pending transactions
         if block_mined:
             self.append_block(new_block)
+            self.display_chain()
         else:
             print("Block mining failed.")
         self.mining_active = False
@@ -252,28 +309,6 @@ class Blockchain:
 
         return True
 
-    def is_ammount_valid(self, transaction:Transaction):
-        # TODO: store actual wallets balance in a hashmap and update it on every transaction instead of calculating this every time
-        total = 0
-        if transaction.recipient == transaction.sender:
-            return False
-        for block in self.chain:
-            for t in block.transactions:
-                if t.recipient == transaction.sender: #check if sender recieved coins
-                    total += t.amount
-                if t.sender == transaction.sender: #check if sender sent coins
-                    total -= t.amount
-        if total < transaction.amount:
-            return False
-        for t in self.pending_transactions: #check doublespent
-            if t.recipient == transaction.sender: 
-                total += t.amount
-            if t.sender == transaction.sender: 
-                total -= t.amount
-        if total < 0:
-            return False
-        else:
-            return True
 
     def try_add_block(self, block: Block) -> bool:
         if block.previous_hash == self.get_latest_block().hash:

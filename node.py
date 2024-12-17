@@ -3,6 +3,7 @@ import threading
 import socket
 import logging
 import argparse
+import sys, json
 from fastapi import FastAPI
 from copy import deepcopy
 
@@ -58,8 +59,9 @@ class Message:
             assert isinstance(data, bytes)
             self.data = data
 
-        self.hash = adler32(self.data + time.ctime().encode()) if not hash else hash
+        self.hash = adler32(self.data) if not hash else hash
         self.dataLength = len(data)
+        self.sender = None
 
 
     def toBytes(self) -> bytes:
@@ -132,18 +134,35 @@ class HTTPServer:
         self.app.add_api_route("/public_key", self.get_public_key, methods=["GET"])
         self.app.add_api_route("/transactions", self.get_transactions, methods=["GET"])
         self.app.add_api_route("/transaction", self.add_transaction, methods=["POST"])
+        self.app.add_api_route("/connections", self.get_connections, methods=["GET"])
 
     def hello(self):
         return {"Hello": "World"}
 
     def get_blockchain(self):
+        self.node._blockchain = self.node.prepareBlockchain()
+        if self.node._blockchain is None:
+            return({})
         result = self.node.returnBlockchainObj()
         return result.as_dict()
 
+    def get_connections(self):
+        result = self.node.connections
+        connections_serializable = {
+        key: conn.as_dict() for key, conn in result.items()
+        }   
+        return json.dumps(connections_serializable)
+    
     def get_public_key(self):
+        if self.node._blockchain is None:
+            return({})
         return {"public_key":str(get_public_key_from_pk(self.node.wallet_key))}
 
     def get_transactions(self):
+        if self.node.wallet_key == "":
+            return {"result": "Not mining, exited gracefuly"}
+        if self.node._blockchain is None:
+            return({})
         transactions = self.node.returnAwaitingTransactions()
         if not transactions:
             return {"transactions": "empty"}
@@ -159,6 +178,8 @@ class HTTPServer:
             result = "Transaction accepted"
         else:
             result = "Transaction rejected"
+        if self.node.wallet_key == "":
+            result = "Not mining, transaction forwarded"
         return {"result": result}
 
     def run(self):
@@ -181,6 +202,14 @@ class Connection:
         self._lock = threading.Lock()
         self.response = None
         # TODO: add asking if this is node
+    
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "destination": self.destination,
+            # Exclude non-serializable attributes like socket
+            "node_name": self.node.name if self.node else None  # Example transformation
+        }
 
     def closeConnection(self):
         self.node.removeConnection(self)
@@ -210,17 +239,21 @@ class Connection:
                 break
 
             try:
-                data = self.socket.recv(1024)
+                data = self.socket.recv(102400)# TODO: check if message is complete, for long blockchain it will be required!
                 if not data:
                     self.closeConnection()
                     return
-
                 # TODO: check if message is complete, for long blockchain it will be required!
                 msg = Message.fromBytes(data)
+                ip, port = self.socket.getsockname()
+                msg.source = port
+                
                 self.processData(msg)
                 break
             except BlockingIOError:
                 time.sleep(0.5)
+            except ConnectionResetError:
+                self.node.removeConnection(self)
 
     def forwardMessage(self, msg: Message):
         self.txQueue.put(msg)
@@ -240,6 +273,8 @@ class Connection:
 
         if msg.control == Message.Control.BLOCKCHAIN_REQ:
             blockchain_bytes = self.node.returnBlockchainBytes()
+            if blockchain_bytes == None:
+                return
             result = Message.blockchainAnnouncement(blockchain_bytes)
             self.txQueue.put(result)
             return
@@ -262,22 +297,27 @@ class Connection:
         if msg.control == Message.Control.ECHO:
             self.txQueue.put(msg)
 
-    def askForBlockchain(self) -> bytes:
+    def askForBlockchain(self, timeout: int = 10) -> Optional[bytes]:
         request = Message.blockchainRequest()
         self.forwardMessage(request)
+
+        start_time = time.time()
         result = None
-        while True: # TODO: some timeout should be applied
+        while time.time() - start_time < timeout:  # Wait for a response within the timeout period
             with self._lock:
                 if self.response:
                     result = self.response
                     self.response = None
                     break
             time.sleep(0.1)
+
+        if not result:
+            self.logger.warning(f"Timeout occurred while waiting for blockchain response from {self.destination}") #TODO: check why it sometimes timeouts
         return result
 
 class Node:
     def __init__(self, name: str, peers: Optional[list[int]], pk:str):
-        self.peers=peers
+        self.peers=peers #initial peers dont confuse with connections
         self.wallet_key=pk
         self.connections = dict[int, Connection]()
         self.name = name
@@ -289,29 +329,51 @@ class Node:
         self._condition = threading.Condition()
         self._blockchain = None
 
-    def prepareBlockchain(self, peers: Optional[list[int]]) -> Blockchain:
-        miner_public_key = get_public_key_from_pk(self.wallet_key)
-        if peers:
-            self.connect(peers)
-            blockchain_data = self.askForBlockchain()
-            return Blockchain.fromBytes(miner_public_key, blockchain_data)
-        else:
-            return Blockchain(miner_public_key)
+    def prepareBlockchain(self) -> Blockchain:
+        if not self.connections and self._blockchain is not None and self.wallet_key != "":
+            return self._blockchain
 
-    def askForBlockchain(self) -> bytes:
+        #not mining no connections
+        if self.wallet_key == "" and not self.connections:
+            return None
+        
+        #mining no connections
+        if self.wallet_key != "" and not self.connections:
+            miner_public_key = get_public_key_from_pk(self.wallet_key)
+            return Blockchain(miner_public_key)
+    
+        blockchain_data = self.updateBlockchain()
+        if blockchain_data == None:
+            return self._blockchain
+        #not mining
+        if self.wallet_key == "": 
+            return Blockchain.fromBytes(None, blockchain_data)
+        #mining
+        else:
+            miner_public_key = get_public_key_from_pk(self.wallet_key)
+            return Blockchain.fromBytes(miner_public_key, blockchain_data)
+
+    def updateBlockchain(self) -> bytes:
         results = []
-        for id, conn in self.connections.items():
+        for id, conn in self.connections.items(): #pull blockchain from all connections
             results.append(conn.askForBlockchain())
 
         # TODO: handle varying blockchains
-        return results[0]
+        s = sys.getsizeof(self._blockchain)
+        for r in results:
+            if sys.getsizeof(r) > s: #return bigger chain or None
+                return r
+        return None
 
     def returnBlockchainBytes(self) -> bytes:
+        if self._blockchain == None:
+            return
         with self._condition:
             bc_bytes = self._blockchain.toBytes()
         return bc_bytes
 
     def returnBlockchainObj(self) -> Blockchain:
+
         with self._condition:
             result = deepcopy(self._blockchain)
         return result
@@ -350,6 +412,8 @@ class Node:
     def newTransaction(self, transaction: Transaction) -> bool:
         msg = Message.transactionAnnouncement(transaction.toBytes())
         self.broadcastMessage(msg)
+        if self.wallet_key == "": #if not mining dont add transaction
+            return False
         with self._condition:
             try:
                 if self._blockchain.add_transaction(transaction):
@@ -368,17 +432,20 @@ class Node:
             self.logger.warning(f"Received incorrect block:\n{block}")
 
     def broadcastMessage(self, msg: Message):
-        if msg.hash not in self.broadcastedMessages:
-            self.logger.info("Broadcasting a message")
+        if msg.hash not in self.broadcastedMessages: 
+            self.logger.info(f"Broadcasting a message {msg.hash}")
             self.broadcastedMessages.add(msg.hash)
             for id, conn in self.connections.items():
+                if conn.destination == msg.sender:  # Skip sending back to the origin peer TODO
+                    continue
                 self.logger.debug(f"Forward msg to conn id: {id} ({conn.destination})")
                 conn.forwardMessage(msg)
         else:
             self.logger.debug("Ignoring broadcast, message already handled")
 
     def removeConnection(self, conn: Connection):
-        self.connections.pop(conn.id)
+        with self._condition:
+            self.connections.pop(conn.id, None)
 
     def connectionIDGenerator(self):
         connId = 1
@@ -422,7 +489,7 @@ class Node:
     def minerLoop(self):
         with self._condition:
             while True:
-                if self._blockchain.get_pending_transactions_count() == TRANSACTIONS_PER_BLOCK:
+                if self._blockchain.max_transactions_per_block():
                     if self._blockchain.mine_block_on_blockchain():
                         msg = Message.blockAnnouncement(self._blockchain.get_latest_block().toBytes())
                         self.broadcastMessage(msg)
@@ -430,11 +497,17 @@ class Node:
                     self._condition.wait()
 
     def runMiner(self):
-        self._blockchain = self.prepareBlockchain(self.peers)
         miner_thread = threading.Thread(target=self.minerLoop)
         miner_thread.start()
 
+
+    #if miner wallet key is empty, run node in relay mode
+    #relay mode: collect blockchain from peers, dont try to add transactions, broadcast incoming transactions
+    #miner mode: add transactions to blockchain
     def run(self):
+        if self.peers: #first create connections to peers
+            self.connect(self.peers)
+        self._blockchain = self.prepareBlockchain()
         if self.wallet_key != "":
             self.runMiner()
         self.runSocketServer()
@@ -443,11 +516,10 @@ class Node:
 def parseArgs() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wallet_key", default="7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7", type=str)
-    #parser.add_argument("--wallet_key", default="", type=str)
+    #parser.add_argument("--wallet_key", default="", type=str) 
     parser.add_argument("--name", default="A", type=str)
     parser.add_argument("--join", nargs="*", type=int)
     return parser.parse_args()
-
 
 def main():
     args = parseArgs()

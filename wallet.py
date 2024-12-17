@@ -147,12 +147,13 @@ def main():
     parser.add_argument("--f", type=str, help="open file", default=None)
     parser.add_argument("--p", type=str, help="password", default="")
     parser.add_argument("--t", type=str, help="transaction url", default="")
+    parser.add_argument("--a", type=int, help="transaction ammount", default=0)
     args = parser.parse_args()
 
     if args.t != "":
         sender = get_public_key_from_pk('7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7')
         recipient = get_public_key_from_pk('6c6cd441c23ef178270b457bf8dae9535f84b505894ccce8c13e627049be8e3d')
-        tx1 = Transaction(sender=sender, recipient=recipient, amount=10)
+        tx1 = Transaction(sender=sender, recipient=recipient, amount=args.a)
         tx1.signature = sign_with_key('7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7', tx1.hash)["signature"]
         response = requests.post(args.t, json=tx1.as_dict())
         print("Status Code:", response.status_code)
