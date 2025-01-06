@@ -1,6 +1,7 @@
 import argparse
 import os
 import hashlib
+import requests
 import time
 import json
 from ecdsa import SigningKey, SECP256k1
@@ -8,6 +9,8 @@ from ecdsa.util import randrange_from_seed__trytryagain
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
+
+from pow import Transaction
 
 def make_asymetric_key(seed):
     secexp = randrange_from_seed__trytryagain(seed, SECP256k1.order)
@@ -25,8 +28,9 @@ def get_keys_from_seed(seed: str, num: int) -> dict:
     
     return lock
 
-def get_public_key_from_seed(seed: str, num: int) -> str:
-    s_key = make_asymetric_key(f"{num}:"+seed)
+def get_public_key_from_pk(private_key_hex: str) -> str:
+    private_key_bytes = bytes.fromhex(private_key_hex)
+    s_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
     v_key = s_key.verifying_key
     return v_key.to_string().hex()
 
@@ -46,6 +50,17 @@ def sign_data(seed: str, data: str) -> str:
     return {
         "signature": signature,
         "public_key": keys[0]["public_key"]
+    }
+
+def sign_with_key(private_key_hex: str, data: str) -> str:
+    private_key_bytes = bytes.fromhex(private_key_hex)
+    sk = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+    signature = sk.sign(data.encode()).hex()
+    vk = sk.get_verifying_key()
+    public_key_hex = vk.to_string().hex()
+    return {
+        "signature": signature,
+        "public_key": public_key_hex
     }
 
 #TODO: save- keypairs for each of your addresses
@@ -131,8 +146,20 @@ def main():
     parser.add_argument("--number", type=int, help="Specify number of keys to access", default=1)
     parser.add_argument("--f", type=str, help="open file", default=None)
     parser.add_argument("--p", type=str, help="password", default="")
-
+    parser.add_argument("--t", type=str, help="transaction url", default="")
+    parser.add_argument("--a", type=int, help="transaction ammount", default=0)
     args = parser.parse_args()
+
+    if args.t != "":
+        sender = get_public_key_from_pk('7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7')
+        recipient = get_public_key_from_pk('6c6cd441c23ef178270b457bf8dae9535f84b505894ccce8c13e627049be8e3d')
+        tx1 = Transaction(sender=sender, recipient=recipient, amount=args.a)
+        tx1.signature = sign_with_key('7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7', tx1.hash)["signature"]
+        response = requests.post(args.t, json=tx1.as_dict())
+        print("Status Code:", response.status_code)
+        print("Response Body:", response.text)
+        return #todo: curl to post signed transaction
+   
     wallet = {
     'keypairs': None,
     'transaction_cache': mock_transaction()

@@ -26,26 +26,24 @@ zrobic klase blockchain: [..]
 # HOW TO USE:
 pip install -r requirements.txt
 
-#### Najpierw musimy uruchomić node w trybie init z uruchomionym api   
-python socket_api.py  
-
-#### Później możemy dołączyć do node-a podając port  
-python .\socket_api.py --name B --join 53962
-
 http://127.0.0.1:8XXX/docs - swagger gui do test API api będzie na losowym porcie z przedziału 8000-8999
 
-![rest api broadcasting](https://i.imgur.com/gpSycSo.png)
+python node.py [--name name_val] [--join port_num1 [ port_num2 ...[ port_numN]]] [--wallet_key hex_key]
 
-### Samo Uruchomienie Node'a:
-    python node.py [--name name_val] [--join port_num1 [ port_num2 ...[ port_numN]]]
-    ex: python node.py --name A1 --join 11111 22222
+### Uruchomienie Node'a (init w trybie mine):
+    python node.py --wallet_key="xxxx"
+
+### Uruchomienie Node'a (join w trybie relay):
+    python node.py --join 11111 22222 --wallet_key=""
+
+### Wysyłanie transakcji do node-ów z walleta:
+    python wallet.py --t=http://127.0.0.1:55355/transaction --a=5
 
 Logi servera są zapisywane w pliku  "server_{server_name}_{server_port}.log".
 
-### samo Łączenie się z Node'em:
+#### samo Łączenie się z Node'em:
     python socket_cli.py node_port
     ex: python socket_cli.py 12345
 #### wysyłanie broadcastów:
-Aby wysłać broadcast, wiadomość należy zacząć od prefixu "b!":
-
+    Aby wysłać broadcast, wiadomość należy zacząć od prefixu "b!":
     (11223)C: b!Hello

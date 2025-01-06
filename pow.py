@@ -2,24 +2,34 @@ import hashlib
 import json
 import time
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
-from typing import List
+from typing import List, Union, Optional
 
-from wallet import get_public_key_from_seed, sign_data
+from pydantic import BaseModel
+
 
 # Constants
 DIFFICULTY = "0000"
+TRANSACTIONS_PER_BLOCK = 2
 
 def sha256(data):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
 class Transaction:
+    class Model(BaseModel):
+        sender: str
+        recipient: str
+        amount: int
+        timestamp:int
+        signature:str
+        hash:str
+
     """Represents a blockchain transaction."""
     def __init__(self, sender, recipient, amount):
         self.sender = sender        # Public key of the sender
         self.recipient = recipient  # Public key of the recipient
         self.amount = amount        # Amount to be transferred
-        self.timestamp = time.time()
+        self.timestamp = round(time.time())
         self.signature = None       # Signature will be added later
         self.hash = self.generate_hash()
 
@@ -39,17 +49,16 @@ class Transaction:
 
     def verify_signature(self):
         """Verify the transaction's signature using the sender's public key."""
-        if self.sender=="system":
+        if self.sender=="system" and self.amount==int(100/len(DIFFICULTY)):
             return True
         if not self.signature:
             raise ValueError("Transaction is not signed.")
         if not self.sender:
             raise ValueError("Sender public key is missing.")
-        
-        
+
         try:
             vk = VerifyingKey.from_string(bytes.fromhex(self.sender), curve=SECP256k1)
-            result = vk.verify(bytes.fromhex(self.signature['signature']), self.hash.encode())
+            result = vk.verify(bytes.fromhex(self.signature), self.hash.encode())
             return result
         
         except BadSignatureError:
@@ -69,6 +78,21 @@ class Transaction:
     def __str__(self):
         return json.dumps(self.as_dict(), indent=4)
 
+    def toBytes(self) -> bytes:
+        return str(self).encode()
+
+    @classmethod
+    def fromBytes(cls, data: Union[bytes, dict]):
+        if isinstance(data, dict):
+            jsonDict = data
+        else:
+            jsonDict = json.loads(data)
+
+        transaction = cls(jsonDict["sender"], jsonDict["recipient"], jsonDict["amount"])
+        transaction.timestamp = jsonDict["timestamp"]
+        transaction.signature = jsonDict["signature"]
+        transaction.hash = jsonDict["hash"]
+        return transaction
 
 class Block:
     def __init__(self, index, previous_hash, transactions: List[Transaction]):
@@ -85,18 +109,23 @@ class Block:
         block_content = f"{self.index}{self.previous_hash}{transactions_data}{self.timestamp}{self.nonce}"
         return sha256(block_content)
 
-    def mine_block(self):
+    def mine_block(self, bc: "Blockchain"):
         """Mine the block by finding a hash that starts with the target difficulty."""
-        while not self.hash.startswith(DIFFICULTY): 
+        bc.mining_active = True
+        while not self.hash.startswith(DIFFICULTY) and bc.mining_active:
             self.nonce += 1
             self.hash = self.generate_hash()
-        print(f"Block mined: {self.hash}")
+        if self.hash.startswith(DIFFICULTY):
+            print(f"Block mined: {self.hash}")
+            return True
+        else:
+            return False
 
-    def verify_transactions(self):
+    def verify_transactions(self, miner_address):
         reward_transaction_count = 0  # Counter for reward transactions
 
         for transaction in self.transactions:
-            if transaction.sender == "system":
+            if transaction.sender == "system" and transaction.recipient == miner_address:
                 reward_transaction_count += 1
                 # Reject block if multiple reward transactions are found
                 if reward_transaction_count > 1:
@@ -110,46 +139,152 @@ class Block:
 
         return True
 
+    def as_dict(self):
+        """Return a dictionary representation of the transaction."""
+        return {
+            "index": self.index,
+            "previous_hash": self.previous_hash,
+            "transactions": [x.as_dict() for x in self.transactions],
+            "timestamp": self.timestamp,
+            "nonce": self.nonce,
+            "hash": self.hash
+        }
+
+    def __str__(self):
+        return json.dumps(self.as_dict(), indent=4)
+
+    def toBytes(self) -> bytes:
+        return str(self).encode()
+
+    @classmethod
+    def fromBytes(cls, data: Union[bytes, dict]):
+        if isinstance(data, dict):
+            jsonDict = data
+        else:
+            jsonDict = json.loads(data)
+
+        transactions = [Transaction.fromBytes(x) for x in jsonDict["transactions"]]
+        block = cls(jsonDict["index"], jsonDict["previous_hash"], transactions)
+        block.timestamp = jsonDict["timestamp"]
+        block.nonce = jsonDict["nonce"]
+        block.hash = jsonDict["hash"]
+        return block
+
 
 class Blockchain:
-    def __init__(self,miners_address):
-        self.chain = [self.create_genesis_block()]
+    def __init__(self,miners_address, blocks: Optional[list[Block]] = None):
+        self.chain = [self.create_genesis_block()] if not blocks else blocks
         self.pending_transactions: List[Transaction] = []
         self.miners_address=miners_address
 
     def create_genesis_block(self): 
-        """Create the first block (genesis block) in the chain."""
-        return Block(0, "0", [Transaction("COINBASE", "system" , 2000000)])
+        coinbase_message = "Mon Dec 16 2024 21:00:00 GMT+0000"
+        reward = 2000000
+
+        coinbase_transaction = Transaction("COINBASE", "system", reward)
+        coinbase_transaction.signature = coinbase_message  
+        coinbase_transaction.timestamp = 1734382800  # same as in message
+        coinbase_transaction.hash=coinbase_transaction.generate_hash()
+        transactions = [coinbase_transaction]
+
+        genesis_block = Block(0, "0000", transactions)
+        genesis_block.timestamp = 1734382800  # same as in message
+        genesis_block.nonce = 0
+
+        while not genesis_block.hash.startswith(DIFFICULTY):
+            genesis_block.nonce += 1
+            genesis_block.hash = genesis_block.generate_hash()
+
+        return genesis_block
 
     def get_latest_block(self):
         return self.chain[-1]
 
+    def max_transactions_per_block(self):
+        if len(self.pending_transactions) < TRANSACTIONS_PER_BLOCK:
+            return False
+        else:
+            return True
+
     def add_transaction(self, transaction:Transaction):
         """Add a new transaction to the list of pending transactions after verification"""
-        if transaction.verify_signature() and self.is_ammount_valid(transaction):
+        if self.verify_full(transaction): 
             self.pending_transactions.append(transaction)
+            return True
         else:
             print("Transaction invalid. Transaction rejected.")
+            return False
+    
+    def verify_full(self, transaction:Transaction) -> bool:
+        if transaction.sender == "system":
+            return True  # Skip verification for reward transactions
+
+        if not transaction.verify_signature():
+            print("Transaction verification failed: Invalid signature.")
+            return False
+
+        # Step 2: Check sender balance
+        sender_balance = 0
+        for block in self.chain:
+            for t in block.transactions:
+                if t.recipient == transaction.sender:
+                    sender_balance += t.amount  # Add received amount
+                if t.sender == transaction.sender:
+                    sender_balance -= t.amount  # Subtract sent amount
+
+        for t in self.pending_transactions:  # Include pending transactions
+            if t.recipient == transaction.sender:
+                sender_balance += t.amount
+            if t.sender == transaction.sender:
+                sender_balance -= t.amount
+
+        if sender_balance < transaction.amount:
+            print(f"Transaction verification failed: Insufficient balance {sender_balance}. ammount {transaction.amount}")
+            return False
+
+        # Step 3: Check for double spending
+        for t in self.pending_transactions:
+            if t.hash == transaction.hash:
+                print("Transaction verification failed: Double spending detected.")
+                return False
+
+        print("Transaction verified successfully.")
+        return True
+
+    def append_block(self, block: Block, verify: bool = True):
+        if verify:
+            # TODO: this should be done when recieving a block 
+            result = block.verify_transactions(self.miners_address)
+        else:
+            result = True
+            
+        if result:
+            block.verify_transactions(self.miners_address)
+            self.chain.append(block)
+            self.pending_transactions = []
+            return True
+        else:
+            print("Block contains invalid transactions")
+            return False
 
     def mine_block_on_blockchain(self):
         """Mine the pending transactions and reward the miner."""
-        #if not self.pending_transactions:
-        #    print("No transactions to mine.")
-        #    return
 
-        # Reward transaction to the miner TODO:implement reward system
         # Create a new block with all pending transactions
-        self.pending_transactions.append(Transaction(sender="system", recipient=self.miners_address, amount=100))
+        self.pending_transactions.append(Transaction(sender="system", recipient=self.miners_address, amount=int(100/len(DIFFICULTY))))
         new_block = Block(len(self.chain), self.get_latest_block().hash, self.pending_transactions)
-        new_block.mine_block()
-
+        block_mined = new_block.mine_block(self)
+        
         # Add the block to the chain and reset pending transactions
-        if new_block.verify_transactions():
-            self.chain.append(new_block)
-            self.pending_transactions = [] 
-            #print(f"Block mined and added to chain. Miner rewarded with 50 coins.")
+        if block_mined:
+            self.append_block(new_block)
+            self.display_chain()
         else:
-            print("Block contains invalid transactions. Block rejected.")
+            print("Block mining failed.")
+        self.mining_active = False
+
+    def interrupt_mining(self):
+        self.mining_active = False
 
     def to_json(self):
         return json.dumps(self.chain)
@@ -169,32 +304,28 @@ class Blockchain:
                 return False
 
             # Validate transactions
-            if not current_block.verify_transactions():
+            if not current_block.verify_transactions(self.miners_address):
                 return False
 
         return True
 
-    def is_ammount_valid(self, transaction:Transaction):
-        total = 0
-        if transaction.recipient == transaction.sender:
-            return False
-        for block in self.chain:
-            for t in block.transactions:
-                if t.recipient == transaction.sender: #check if sender recieved coins
-                    total += t.amount
-                if t.sender == transaction.sender: #check if sender sent coins
-                    total -= t.amount
-        if total < transaction.amount:
-            return False
-        for t in self.pending_transactions: #check doublespent
-            if t.recipient == transaction.sender: 
-                total += t.amount
-            if t.sender == transaction.sender: 
-                total -= t.amount
-        if total < 0:
-            return False
+
+    def try_add_block(self, block: Block) -> bool:
+        if block.previous_hash == self.get_latest_block().hash:
+            if not self.mining_active:
+                print("Miners not mining!")
+                return False
+
+            for transaction in block.transactions:
+                if transaction not in self.pending_transactions:
+                    print(f"Transaction in proposed block not recognized!\n{transaction}")
+                    return False
+
+            self.interrupt_mining()
+            return self.append_block(block, False)
         else:
-            return True
+            print("Received invalid block")
+            return False
 
     def display_chain(self):
         """Display the entire blockchain."""
@@ -206,12 +337,32 @@ class Blockchain:
             print(f"  Previous Hash: {block.previous_hash}")
             print(f"  Nonce: {block.nonce}\n")
 
+    def as_dict(self):
+        """Return a dictionary representation of the transaction."""
+        return {
+            "chain": [x.as_dict() for x in self.chain],
+        }
+
+    def __str__(self):
+        return json.dumps(self.as_dict(), indent=4)
+
+    def toBytes(self) -> bytes:
+        return str(self).encode()
+
+    @classmethod
+    def fromBytes(cls, miners_address, data: bytes):
+        jsonDict = json.loads(data)
+        blocks = [Block.fromBytes(x) for x in jsonDict["chain"]]
+        return cls(miners_address, blocks)
+
+
 # Example Usage
 if __name__ == "__main__":
-    # Generate keys for sender and recipient using your seed-based function
-    miner_public_key = get_public_key_from_seed("my_secure_seed", 0)
+    pass
+    """ # Generate keys for sender and recipient using your seed-based function
+    miner_public_key = get_public_key_from_pk("7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7")
 
-    recipient_public_key = get_public_key_from_seed("recipient_seed", 0)
+    recipient_public_key = get_public_key_from_pk("recipient_seed")
 
     # Print the generated keys for demonstration
     print(f"Sender Public Key: {miner_public_key}")
@@ -251,4 +402,4 @@ if __name__ == "__main__":
 
     # Display the blockchain
     print("\nBlockchain validation:", blockchain.is_chain_valid())
-    blockchain.display_chain()
+    blockchain.display_chain() """
