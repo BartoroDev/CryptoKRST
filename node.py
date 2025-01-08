@@ -4,13 +4,15 @@ import socket
 import logging
 import argparse
 import sys
-from fastapi import FastAPI
-from copy import deepcopy
+import json
 
+from copy import deepcopy
 from typing import Optional, Union
 from enum import IntEnum
 from zlib import adler32
+from pathlib import Path
 
+from fastapi import FastAPI
 import uvicorn
 
 from pow import Transaction, Blockchain, Block
@@ -627,15 +629,23 @@ class Node:
 
 def parseArgs() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wallet_key", default="7e01f59d8d4793e62ab05b9cd9c3689fb62cbfd86280f677faf41c40181ea2b7", type=str)
-    #parser.add_argument("--wallet_key", default="", type=str) 
+    parser.add_argument("--wallet_key", type=str)
+    parser.add_argument("--config_file", type=Path, default=Path("config.json"))
     parser.add_argument("--name", default="A", type=str)
     parser.add_argument("--join", nargs="*", type=int)
     return parser.parse_args()
 
 def main():
     args = parseArgs()
-    node = Node(args.name, args.join, args.wallet_key)
+    wallet_key = ""
+    if args.wallet_key:
+        wallet_key = args.wallet_key
+    else:  # wallet_key not set, read from config
+        with args.config_file.open("r") as config_file:
+            config = json.load(config_file)
+            wallet_key = config[args.name]["privateKey"]
+
+    node = Node(args.name, args.join, wallet_key)
     node.run()
 
 
