@@ -3,12 +3,12 @@ import threading
 import socket
 import logging
 import argparse
-import sys, json
+import sys
 from fastapi import FastAPI
 from copy import deepcopy
 
 from typing import Optional, Union
-from enum import Flag
+from enum import IntEnum
 from zlib import adler32
 
 import uvicorn
@@ -19,37 +19,31 @@ from wallet import get_public_key_from_pk
 TRANSACTIONS_PER_BLOCK = 2
 
 
-# ------------- PROTOCOL -------------
+# ------------- PROTOCOL - MESSAGES IMPLEMENTATION -------------
 
 class Message:
     # |VERSION(1b)|TYPE(1b)|CONTROL(1b)|HASH(4b)|DATA_LENGTH(2b)|DATA|
-    class Version(Flag):
+    HEADER_LENGTH=9
+    class Version(IntEnum):
         VERSION_ONE = 1
 
-        def toBytes(self):
-            return self.value.to_bytes()
-
-    class Type(Flag):
+    class Type(IntEnum):
         UNICAST = 1
         BROADCAST = 2
 
-        def toBytes(self):
-            return self.value.to_bytes()
+    class Control(IntEnum):
+        ECHO = 0
+        OTHER = 1
+        TRANSACTION_ANNOUNCEMENT = 2
+        BLOCK_ANNOUNCEMENT = 3
+        BLOCKCHAIN_REQUEST = 4
+        BLOCKCHAIN_RESPONSE = 5
+        PORT_REQUEST = 6
+        PORT_RESPONSE = 7
+        NAME_REQUEST = 8
+        NAME_RESPONSE = 9
 
-    class Control(Flag):
-        # *_REQ - request
-        # *_ANN - announcement/response
-        TRANSACTION_ANN = 1
-        BLOCK_ANN = 2
-        BLOCKCHAIN_REQ = 3
-        BLOCKCHAIN_ANN = 4
-        ECHO = 5
-        OTHER = 6
-
-        def toBytes(self):
-            return self.value.to_bytes()
-
-    def __init__(self, data: Union[str, bytes], *, version: Version = Version.VERSION_ONE, type: Type = Type.UNICAST, control: Control = Control.OTHER, hash: int = 0):
+    def __init__(self, data: Union[str, bytes], *, version: Version = Version.VERSION_ONE, type: Type = Type.UNICAST, control: Control = Control.ECHO, hash: int = 0):
         self.version = version
         self.type = type
         self.control = control
@@ -65,50 +59,70 @@ class Message:
 
 
     def toBytes(self) -> bytes:
-        return self.version.toBytes() + self.type.toBytes() + self.control.toBytes() + self.hash.to_bytes(4) + self.dataLength.to_bytes(2, byteorder='big') + self.data
+        return self.version.to_bytes(1) + self.type.to_bytes(1) + self.control.to_bytes(1) + self.hash.to_bytes(4) + self.dataLength.to_bytes(2) + self.data
 
     @classmethod
     def fromBytes(cls, msg: bytes):
-        version = cls.Version(msg[0])
-        type = cls.Type(msg[1])
-        control = cls.Control(msg[2])
+        version = cls.Version.from_bytes(msg[0:1])
+        type = cls.Type.from_bytes(msg[1:2])
+        control = cls.Control.from_bytes(msg[2:3])
         hash = int.from_bytes(msg[3:7])
         dataLength = int.from_bytes(msg[7:9])
-        assert dataLength == len(msg[9:])
+        assert len(msg[9:]) >= dataLength, f"""
+            HEADER:\t{msg[:9].hex()}
+            DATA:\t{msg[9:].hex()}
+            EXPECTED DATA_LEN:\t{dataLength}
+            ACTUAL DATA_LEN:\t{len(msg[9:])}
+            """
         if dataLength > 0:
-            data = msg[9:].decode()
+            data = msg[9:(9+dataLength)]
         else:
             data = ""
         return cls(data, version=version, type=type, control=control, hash=hash)
 
     @classmethod
     def blockchainRequest(cls):
-        return cls("", control=cls.Control.BLOCKCHAIN_REQ)
+        return cls("", control=cls.Control.BLOCKCHAIN_REQUEST)
 
     @classmethod
-    def blockchainAnnouncement(cls, data):
-        return cls(data, control=cls.Control.BLOCKCHAIN_ANN)
+    def blockchainResponse(cls, data):
+        return cls(data, control=cls.Control.BLOCKCHAIN_RESPONSE)
 
     @classmethod
     def blockAnnouncement(cls, data):
-        return cls(data, type=cls.Type.BROADCAST, control=cls.Control.BLOCK_ANN)
+        return cls(data, type=cls.Type.BROADCAST, control=cls.Control.BLOCK_ANNOUNCEMENT)
 
     @classmethod
     def transactionAnnouncement(cls, data):
-        return cls(data, type=cls.Type.BROADCAST, control=cls.Control.TRANSACTION_ANN)
+        return cls(data, type=cls.Type.BROADCAST, control=cls.Control.TRANSACTION_ANNOUNCEMENT)
 
+    @classmethod
+    def portRequest(cls):
+        return cls("", control=cls.Control.PORT_REQUEST)
+
+    @classmethod
+    def portResponse(cls, port: int):
+        return cls(int.to_bytes(port, 4), control=cls.Control.PORT_RESPONSE)
+
+    @classmethod
+    def nameRequest(cls):
+        return cls("", control=cls.Control.NAME_REQUEST)
+
+    @classmethod
+    def nameResponse(cls, name: str):
+        return cls(name, control=cls.Control.NAME_RESPONSE)
 
 
 class Queue:
     def __init__(self):
-        self._queue = list()
+        self._queue = list[Message]()
         self._lock = threading.Lock()
 
     def put(self, item):
         with self._lock:
             self._queue.append(item)
 
-    def pop(self):
+    def pop(self) -> Message:
         with self._lock:
             ret = self._queue.pop()
         return ret
@@ -119,7 +133,7 @@ class Queue:
         return False if ret > 0 else True
 
 
-#  ------------- HTTP SERVER -------------
+#  ------------- HTTP SERVER (REST API) -------------
 
 class HTTPServer:
     def __init__(self,  node: "Node", logger: logging.Logger):
@@ -147,11 +161,12 @@ class HTTPServer:
         return result.as_dict()
 
     def get_connections(self):
-        result = self.node.connections
-        connections_serializable = {
-        key: conn.as_dict() for key, conn in result.items()
-        }   
-        return json.dumps(connections_serializable)
+        connections_dict = {
+            "node name": self.node.name,
+            "node port": self.node.socketServerPort,
+            "connections": [connection.as_dict() for connection in self.node.connections.values()]
+        }
+        return connections_dict
     
     def get_public_key(self):
         if self.node._blockchain is None:
@@ -183,15 +198,17 @@ class HTTPServer:
         return {"result": result}
 
     def run(self):
-        uvicorn.run(self.app, port=0, log_level=logging.INFO)
+        uvicorn.run(self.app, port=0, log_level=logging.DEBUG)
 
 
-# ------------- SOCKET SERVER / NODE -------------
+# ------------- CONNECTIONS AND MESSAGE PROCESSING -------------
 
 class Connection:
-    def __init__(self, connection: socket.socket, destination, id, node: "Node"):
+    def __init__(self, connection: socket.socket, destination, id, node: "Node", serverPort = 0):
         self.socket = connection
-        self.destination = destination
+        self.destination = destination  # separate socket connection destination for connected server
+        self.destinationNodePort = serverPort  # port on which the connected server listens for connections
+        self.destinationNodeName = ""
         self.id = id
         self.msgCount = 0
         self.node = node
@@ -201,109 +218,18 @@ class Connection:
         self._running = False
         self._lock = threading.Lock()
         self.response = None
-        # TODO: add asking if this is node
-    
-    def as_dict(self):
-        return {
-            "id": self.id,
-            "destination": self.destination,
-            # Exclude non-serializable attributes like socket
-            "node_name": self.node.name if self.node else None  # Example transformation
-        }
 
-    def closeConnection(self):
-        self.node.removeConnection(self)
-        self.logger.info(f"Closing connection with: {self.destination}")
-        self._running = False
-
-
-    def loop(self):
-        self._running = True
-        with self.socket:
-            self.logger.info(f"Connected with {self.destination}")
-            while self._running:
-                self.receiveMessage()
-                self.sendMessage()
-                
-
-    def sendMessage(self):
-        if not self.txQueue.isEmpty():
-            msg = self.txQueue.pop()
-            self.logger.info(f"SEND ({self.destination[1]}): {msg.data}")
-            self.logger.debug(f"tx: {msg.toBytes()}")
-            self.socket.sendall(msg.toBytes())
-
-    def receiveMessage(self):
-        while True:  # receive complete message
-            if not self.txQueue.isEmpty():
-                break
-
-            try:
-                data = self.socket.recv(102400)# TODO: check if message is complete, for long blockchain it will be required!
-                if not data:
-                    self.closeConnection()
-                    return
-                # TODO: check if message is complete, for long blockchain it will be required!
-                msg = Message.fromBytes(data)
-                ip, port = self.socket.getsockname()
-                msg.source = port
-                
-                self.processData(msg)
-                break
-            except BlockingIOError:
-                time.sleep(0.5)
-            except ConnectionResetError:
-                self.node.removeConnection(self)
-
-    def forwardMessage(self, msg: Message):
+    def sendMessage(self, msg: Message):
         self.txQueue.put(msg)
 
-    def processData(self, msg: Message):
-        if msg.type == Message.Type.BROADCAST:
-            self.logger.debug("Received broadcast")
-            self.node.broadcastMessage(msg)
-
-
-        if msg.data == b"close":
-            self.closeConnection()
-            return
-
-        self.logger.debug(f"rx: {msg.toBytes()}")
-        self.logger.info(f"RECV ({self.destination[1]}): {msg.data}")
-
-        if msg.control == Message.Control.BLOCKCHAIN_REQ:
-            blockchain_bytes = self.node.returnBlockchainBytes()
-            if blockchain_bytes == None:
-                return
-            result = Message.blockchainAnnouncement(blockchain_bytes)
-            self.txQueue.put(result)
-            return
-
-        if msg.control == Message.Control.BLOCKCHAIN_ANN:
-            with self._lock:
-                self.response = msg.data
-            return
-
-        if msg.control == Message.Control.TRANSACTION_ANN:
-            trans = Transaction.fromBytes(msg.data)
-            self.node.newTransaction(trans)
-            return
-
-        if msg.control == Message.Control.BLOCK_ANN:
-            block = Block.fromBytes(msg.data)
-            self.node.receivedBlock(block)
-            return
-
-        if msg.control == Message.Control.ECHO:
-            self.txQueue.put(msg)
-
+    # TODO: move this function to node class
     def askForBlockchain(self, timeout: int = 10) -> Optional[bytes]:
         request = Message.blockchainRequest()
-        self.forwardMessage(request)
+        self.sendMessage(request)
 
         start_time = time.time()
         result = None
-        while time.time() - start_time < timeout:  # Wait for a response within the timeout period
+        while time.time() - start_time < timeout and self._running:  # Wait for a response within the timeout period
             with self._lock:
                 if self.response:
                     result = self.response
@@ -312,24 +238,168 @@ class Connection:
             time.sleep(0.1)
 
         if not result:
-            self.logger.warning(f"Timeout occurred while waiting for blockchain response from {self.destination}") #TODO: check why it sometimes timeouts
+            failReason = "Timeout" if time.time() < (start_time + timeout) else "connection error"
+            self.logger.warning(f"Fetching blockchain response failed from {self.destinationNodePort} failed, reason: {failReason}")  #TODO: check why it sometimes timeouts
+
         return result
+
+    def as_dict(self):
+        return {
+            "connection id": self.id,
+            "destination node name": self.destinationNodeName,
+            "destination node port": self.destinationNodePort
+        }
+
+    def closeConnection(self):
+        self.node.removeConnection(self)
+        self._running = False
+        self.logger.info(f"Closing connection with: {self.destinationNodePort}")
+
+
+    def loop(self):
+        self._running = True
+        try:
+            with self.socket:
+                self.logger.info(f"Connected with {self.destinationNodePort}")
+
+                self.txQueue.put(Message.nameRequest())
+                if self.destinationNodePort == 0:
+                    self.txQueue.put(Message.portRequest())
+
+                while self._running:
+                    self._receiveMessage()
+                    self._sendMessage()
+        except:
+            self.closeConnection()
+            raise
+
+    def _sendMessage(self):
+        if not self.txQueue.isEmpty():
+            msg = self.txQueue.pop()
+            self.logger.info(f"SEND({self.destinationNodePort}): {msg.control.name}")
+            self.logger.debug(f"tx: {msg.toBytes().hex()}")
+            self.socket.sendall(msg.toBytes())
+
+    def _receiveMessage(self):
+        completeData = b''
+        while True and self._running:  # receive complete message
+            if not self.txQueue.isEmpty():
+                break
+
+            try:
+                data = self.socket.recv(1024)
+                if not data:
+                    self.closeConnection()
+                    return
+
+                completeData += data
+                if len(data) == 1024:  # full socket
+                    continue
+
+                parsedMessages = self._parseData(completeData)
+                for msg in parsedMessages:
+                    self._processData(msg)
+                break
+            except BlockingIOError:
+                time.sleep(0.5)
+            except ConnectionResetError:
+                self.closeConnection()
+
+    def _processData(self, msg: Message):
+        if msg.type == Message.Type.BROADCAST:
+            self.logger.debug("Received broadcast")
+            self.node.broadcastMessage(msg)
+
+        if msg.data == b"close":
+            self.closeConnection()
+            return
+
+        self.logger.debug(f"rx: {msg.toBytes().hex()}")
+        self.logger.info(f"RECV({self.destinationNodePort}): {msg.control.name}")
+
+        if msg.control == Message.Control.BLOCKCHAIN_REQUEST:
+            blockchain_bytes = self.node.returnBlockchainBytes()
+            if blockchain_bytes == None:
+                return
+            response = Message.blockchainResponse(blockchain_bytes)
+            self.txQueue.put(response)
+            return
+
+        if msg.control == Message.Control.BLOCKCHAIN_RESPONSE:
+            with self._lock:
+                self.response = msg.data
+            return
+
+        if msg.control == Message.Control.TRANSACTION_ANNOUNCEMENT:
+            trans = Transaction.fromBytes(msg.data)
+            self.node.newTransaction(trans)
+            return
+
+        if msg.control == Message.Control.BLOCK_ANNOUNCEMENT:
+            block = Block.fromBytes(msg.data)
+            self.node.receivedBlock(block)
+            return
+
+        if msg.control == Message.Control.PORT_REQUEST:
+            response = Message.portResponse(self.node.socketServerPort)
+            self.txQueue.put(response)
+            return
+
+        if msg.control == Message.Control.PORT_RESPONSE:
+            self.destinationNodePort = int.from_bytes(msg.data[0:4])
+            return
+
+        if msg.control == Message.Control.NAME_REQUEST:
+            response = Message.nameResponse(self.node.name)
+            self.txQueue.put(response)
+            return
+
+        if msg.control == Message.Control.NAME_RESPONSE:
+            self.destinationNodeName = msg.data.decode()
+            return
+
+        if msg.control == Message.Control.ECHO:
+            self.txQueue.put(msg)
+
+    def _parseData(self, data: bytes) -> list[Message]:
+        startIndex = 0
+        messages = []
+        while True:
+            messageStart = data.find(Message.Version.VERSION_ONE.to_bytes(), startIndex)
+            if messageStart == -1:
+                return messages
+
+            try:
+                msg = Message.fromBytes(data[messageStart:])
+                messages.append(msg)
+                startIndex += Message.HEADER_LENGTH + msg.dataLength
+            except (UnicodeDecodeError, ValueError):
+                logging.warning(f"Failed to parse data: {data.hex()}")
+                startIndex += 1
+            continue
+
+
+# ------------- NODE (SOCKET SERVER) -------------
 
 class Node:
     def __init__(self, name: str, peers: Optional[list[int]], pk:str):
         self.peers=peers #initial peers dont confuse with connections
         self.wallet_key=pk
         self.connections = dict[int, Connection]()
+        self._connections_threads = dict[int, threading.Thread]()
         self.name = name
         self.socketServer = self.prepareSocketServer()
+        self.socketServerPort = self.socketServer.getsockname()[1]
         self.logger = self.prepareLogger()
         self.webServer = HTTPServer(self, self.logger)
         self.broadcastedMessages = set[int]()
         self._connId = self.connectionIDGenerator()
-        self._condition = threading.Condition()
+        self._blockchain_condition = threading.Condition()
+        self._connection_lock = threading.Lock()
         self._blockchain = None
+        self.stop = threading.Event()
 
-    def prepareBlockchain(self) -> Blockchain:
+    def prepareBlockchain(self) -> Optional[Blockchain]:
         if not self.connections and self._blockchain is not None and self.wallet_key != "":
             return self._blockchain
 
@@ -355,8 +425,14 @@ class Node:
 
     def updateBlockchain(self) -> bytes:
         results = []
-        for id, conn in self.connections.items(): #pull blockchain from all connections
-            results.append(conn.askForBlockchain())
+        # iterate over connections id instead of connections_pool cause connections_pool may change during iteration
+        connIds = list(self.connections.keys())
+        for id in connIds:  # pull blockchain from all connections
+            connection = self.connections.get(id, None)
+            if connection:
+                results.append(connection.askForBlockchain())
+                
+
 
         # TODO: handle varying blockchains
         s = sys.getsizeof(self._blockchain)
@@ -368,18 +444,16 @@ class Node:
     def returnBlockchainBytes(self) -> bytes:
         if self._blockchain == None:
             return
-        with self._condition:
-            bc_bytes = self._blockchain.toBytes()
-        return bc_bytes
+        with self._blockchain_condition:
+            return self._blockchain.toBytes()
 
     def returnBlockchainObj(self) -> Blockchain:
-
-        with self._condition:
+        with self._blockchain_condition:
             result = deepcopy(self._blockchain)
         return result
 
     def returnAwaitingTransactions(self):
-        with self._condition:
+        with self._blockchain_condition:
             transactions = deepcopy(self._blockchain.pending_transactions)
         return transactions
 
@@ -387,13 +461,13 @@ class Node:
         logger = logging.getLogger()
         logger.setLevel(logging.DEBUG)
 
-        formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%m/%d/%Y %I:%M:%S")
+        formatter = logging.Formatter("%(levelname)s:\t%(asctime)s - %(message)s", datefmt="%H:%M:%S")
 
         consoleHandler = logging.StreamHandler()
         consoleHandler.setFormatter(formatter)
         consoleHandler.setLevel(logging.INFO)
 
-        logFilename = f"server_{self.name}_{str(self.socketServer.getsockname()[1])}.log"
+        logFilename = f"server_{self.name}_{str(self.socketServerPort)}.log"
         fileHandler = logging.FileHandler(logFilename, encoding="utf-8")
         fileHandler.setFormatter(formatter)
         fileHandler.setLevel(logging.DEBUG)
@@ -414,10 +488,10 @@ class Node:
         self.broadcastMessage(msg)
         if self.wallet_key == "": #if not mining dont add transaction
             return False
-        with self._condition:
+        with self._blockchain_condition:
             try:
                 if self._blockchain.add_transaction(transaction):
-                    self._condition.notify()
+                    self._blockchain_condition.notify()
                     return True
                 else:
                     return False
@@ -435,17 +509,13 @@ class Node:
         if msg.hash not in self.broadcastedMessages: 
             self.logger.info(f"Broadcasting a message {msg.hash}")
             self.broadcastedMessages.add(msg.hash)
-            for id, conn in self.connections.items():
-                if conn.destination == msg.sender:  # Skip sending back to the origin peer TODO
+            for id, connection in self.connections.items():
+                if connection.destination == msg.sender:  # Skip sending back to the origin peer TODO
                     continue
-                self.logger.debug(f"Forward msg to conn id: {id} ({conn.destination})")
-                conn.forwardMessage(msg)
+                self.logger.debug(f"Forward msg to conn id: {id} ({connection.destination})")
+                connection.sendMessage(msg)
         else:
             self.logger.debug("Ignoring broadcast, message already handled")
-
-    def removeConnection(self, conn: Connection):
-        with self._condition:
-            self.connections.pop(conn.id, None)
 
     def connectionIDGenerator(self):
         connId = 1
@@ -453,13 +523,20 @@ class Node:
             yield connId
             connId += 1
 
+    def removeConnection(self, conn: Connection):
+        with self._connection_lock:
+            self.connections.pop(conn.id)
+            # TODO: improve removing connections so that the main thread can join each connection thread
+            self._connections_threads.pop(conn.id)
 
-    def createConnection(self, conn: socket.socket, addr):
+    def newConnection(self, connectionSocket: socket.socket, addr, port: int = 0):
         id = next(self._connId)
-        connection = Connection(conn, addr, id, self)
-        self.connections[id] = connection
+        connection = Connection(connectionSocket, addr, id, self, port)
         connThread = threading.Thread(target=connection.loop)
         connThread.start()
+        with self._connection_lock:
+            self.connections[id] = connection
+            self._connections_threads[id] = connThread
 
     def connect(self, ports: list[int]):
         for port in ports:
@@ -467,39 +544,66 @@ class Node:
                 cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 address = ("localhost", port)
                 cli.connect(address)
-                self.createConnection(cli, address)
+                self.newConnection(cli, address, port)
             except ConnectionRefusedError:
                 self.logger.info(f"Couldn't connect with {address}")
 
     def runSocketServer(self):
         def listenForConnections():
-            self.logger.info(f"Start socket server {self.name} on port: {self.socketServer.getsockname()[1]}")
+            self.logger.info(f"Start socket server {self.name} on port: {self.socketServerPort}")
             with self.socketServer as s:
-                while True:  # wait for connections, some sane upper limit can be applied
-                    conn, addr = s.accept()
-                    self.createConnection(conn, addr)
+                s.settimeout(1)
+                while True and not self.stop.is_set():  # wait for connections, some sane upper limit can be applied
+                    try:
+                        conn, addr = s.accept()
+                        self.newConnection(conn, addr)
+                    except TimeoutError:
+                        pass
+                self.logger.info("Socket server stopped")
 
-        socketServerThread = threading.Thread(target=listenForConnections)
-        socketServerThread.start()
+        self.socketServerThread = threading.Thread(target=listenForConnections)
+        self.socketServerThread.start()
 
     def runWebServer(self):
         self.webServer.addAppRoutes()
         self.webServer.run()
 
     def minerLoop(self):
-        with self._condition:
-            while True:
+        assert self._blockchain is not None
+        while True and not self.stop.is_set():
+            with self._blockchain_condition:
                 if self._blockchain.max_transactions_per_block():
                     if self._blockchain.mine_block_on_blockchain():
                         msg = Message.blockAnnouncement(self._blockchain.get_latest_block().toBytes())
                         self.broadcastMessage(msg)
                 else:
-                    self._condition.wait()
+                    self._blockchain_condition.wait(1)
+        self.logger.info("Miner stopped")
 
     def runMiner(self):
-        miner_thread = threading.Thread(target=self.minerLoop)
-        miner_thread.start()
+        self.minerThread = threading.Thread(target=self.minerLoop)
+        self.minerThread.start()
 
+
+    def stopNode(self):
+        self.logger.info("Stopping node")
+        self.stop.set()
+        self.minerThread.join(1)
+        self.socketServerThread.join(1)
+
+        if self._connections_threads:
+            activeConnectionsCount = len(self._connections_threads.items())
+            self.logger.warning(f"Connections still connected: {activeConnectionsCount}")
+            assert threading.active_count() - 1 == activeConnectionsCount
+            assert len(self.connections.items()) == activeConnectionsCount
+
+        connIds = list(self.connections.keys())
+        for id in connIds:
+            conn = self.connections.get(id, None)
+            if conn:
+                conn.closeConnection()
+
+        self.logger.info("Node stopped")
 
     #if miner wallet key is empty, run node in relay mode
     #relay mode: collect blockchain from peers, dont try to add transactions, broadcast incoming transactions
@@ -509,9 +613,17 @@ class Node:
             self.connect(self.peers)
         self._blockchain = self.prepareBlockchain()
         if self.wallet_key != "":
+            if not self._blockchain:
+                # TODO: retry retrieving blockchain
+                self.logger.warning("Node couldn't retrieve blockchain from peers, terminating")
+                return
             self.runMiner()
         self.runSocketServer()
         self.runWebServer()
+
+        # web server exited - terminate application
+        self.stopNode()
+
 
 def parseArgs() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
