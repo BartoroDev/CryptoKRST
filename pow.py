@@ -3,6 +3,7 @@ import json
 import time
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
 from typing import List, Union, Optional
+from copy import deepcopy
 
 from pydantic import BaseModel
 
@@ -75,9 +76,6 @@ class Transaction:
             "hash": self.hash
         }
 
-    def __str__(self):
-        return json.dumps(self.as_dict(), indent=4)
-
     def toBytes(self) -> bytes:
         return str(self).encode()
 
@@ -93,6 +91,26 @@ class Transaction:
         transaction.signature = jsonDict["signature"]
         transaction.hash = jsonDict["hash"]
         return transaction
+
+    def __str__(self):
+        return json.dumps(self.as_dict(), indent=4)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Transaction):
+            if self.sender != other.sender:
+                return False
+            if self.recipient != other.recipient:
+                return False
+            if self.amount != other.amount:
+                return False
+            if self.timestamp != other.timestamp:
+                return False
+            if self.signature != other.signature:
+                return False
+            if self.hash != other.hash:
+                return False
+            return True
+        return False
 
 class Block:
     def __init__(self, index, previous_hash, transactions: List[Transaction]):
@@ -150,9 +168,6 @@ class Block:
             "hash": self.hash
         }
 
-    def __str__(self):
-        return json.dumps(self.as_dict(), indent=4)
-
     def toBytes(self) -> bytes:
         return str(self).encode()
 
@@ -169,6 +184,30 @@ class Block:
         block.nonce = jsonDict["nonce"]
         block.hash = jsonDict["hash"]
         return block
+
+    def __str__(self):
+        return json.dumps(self.as_dict(), indent=4)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Block):
+            if self.index != other.index:
+                return False
+            if self.previous_hash != other.previous_hash:
+                return False
+            if self.timestamp != other.timestamp:
+                return False
+            if self.nonce != other.nonce:
+                return False
+            if self.hash != other.hash:
+                return False
+            if len(self.transactions) != len(other.transactions):
+                return False
+            for this_tx, other_tx in zip(self.transactions, other.transactions):
+                if this_tx != other_tx:
+                    return False
+            return True
+        return False
+
 
 
 class Blockchain:
@@ -208,14 +247,14 @@ class Blockchain:
 
     def add_transaction(self, transaction:Transaction):
         """Add a new transaction to the list of pending transactions after verification"""
-        if self.verify_full(transaction): 
+        if self.verify_transaction(transaction):
             self.pending_transactions.append(transaction)
             return True
         else:
             print("Transaction invalid. Transaction rejected.")
             return False
     
-    def verify_full(self, transaction:Transaction) -> bool:
+    def verify_transaction(self, transaction:Transaction) -> bool:
         if transaction.sender == "system":
             return True  # Skip verification for reward transactions
 
@@ -289,8 +328,11 @@ class Blockchain:
     def to_json(self):
         return json.dumps(self.chain)
 
-    def is_chain_valid(self):
+    def verify_chain(self):
         """Validate the entire blockchain."""
+        if self.chain[0] != self.create_genesis_block():
+            return False
+
         for i in range(1, len(self.chain)):
             current_block = self.chain[i]
             previous_block = self.chain[i - 1]
@@ -326,6 +368,16 @@ class Blockchain:
         else:
             print("Received invalid block")
             return False
+
+    def block_count(self):
+        return len(self.chain)
+
+    def get_block(self, block_no: int) -> Optional[Block]:
+        if block_no < 0 or block_no >= self.block_count():
+            print(f"Block number invalid! [{block_no}/{self.block_count()}]")
+            return None
+
+        return deepcopy(self.chain[block_no])
 
     def display_chain(self):
         """Display the entire blockchain."""
