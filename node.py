@@ -392,7 +392,7 @@ class Node:
     def prepareBlockchain(self) -> bool:
         assert self.mode is NodeMode.FULL_MODE
         miner_public_key = get_public_key_from_pk(self.wallet_key)
-        if not self.peers:
+        if len(self.connections.keys()) == 0:
             self.blockchain = Blockchain(miner_public_key, DIFFICULTY_LEVEL, logger=self.logger)
             self.logger.info("Node starts its own blockchain")
             return True
@@ -550,8 +550,6 @@ class Node:
 
         assert self.blockchain is not None
         block = Block.fromBytes(msg.data)
-        if block == self.blockchain.get_latest_block():
-            return False
         self.blockchain.try_add_block(block)
 
     def broadcastMessage(self, msg: Message):
@@ -622,6 +620,8 @@ class Node:
             if self.blockchain.mine_block_on_blockchain(self.stop):
                 msg = Message.blockAnnouncement(self.socketServerPort, self.blockchain.get_latest_block().toBytes())
                 self.broadcastMessage(msg)
+                if self.blockchain.get_second_latest_block().confirmation_count == -1:
+                    self.prepareBlockchain()
 
         self.logger.info("Miner stopped")
 
