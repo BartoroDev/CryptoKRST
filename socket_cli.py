@@ -13,7 +13,7 @@ def parseArgs() -> argparse.Namespace:
 
 def main(port):
     msgId = 1
-    msg = Message("Connected")
+    msg = Message("Connected", 0)
     inputed = None
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect(("localhost", port))
@@ -29,12 +29,9 @@ def main(port):
                 received = s.recv(1024)
                 print(f"({s.getpeername()[1]})S: {received!r}")
                 receivedMsg = Message.fromBytes(received)
-                if receivedMsg.control == Message.Control.PORT_REQUEST:
-                    msg = Message.portResponse(clientPort)
-                    continue
 
                 if receivedMsg.control == Message.Control.NAME_REQUEST:
-                    msg = Message.nameResponse("socket client")
+                    msg = Message.nameResponse(clientPort, "socket client")
                     continue
             except TimeoutError:
                 pass
@@ -44,7 +41,7 @@ def main(port):
             msgType = Message.Type.BROADCAST if inputed[:2] == "b!" else Message.Type.UNICAST
             if msgType == Message.Type.BROADCAST:
                 inputed = inputed[2:]
-            msg = Message(inputed, type=msgType)
+            msg = Message(inputed, clientPort, type=msgType)
 
 
 if __name__ == "__main__":
