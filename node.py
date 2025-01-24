@@ -1,5 +1,4 @@
 import time
-import calendar
 import threading
 import socket
 import logging
@@ -549,9 +548,8 @@ class Node:
 
         assert self.blockchain is not None
         block = Block.fromBytes(msg.data)
-        if block == self.blockchain.get_latest_block():
-            return False
-        self.blockchain.try_add_block(block)
+        if not self.blockchain.try_add_block(block):
+            self.logger.info("Block invalid")
 
     def broadcastMessage(self, msg: Message):
         if msg.hash not in self.broadcastedMessages: 

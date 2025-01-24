@@ -1,3 +1,5 @@
+from pathlib import Path
+from threading import Event
 import hashlib
 import json
 import time
@@ -58,17 +60,17 @@ class Transaction:
         """Verify the transaction's signature using the sender's public key."""
         if self.sender=="system": # and self.amount==int(100/len(DIFFICULTY)):
             return True
-        if not self.signature:
-            raise ValueError("Transaction is not signed.")
-        if not self.sender:
-            raise ValueError("Sender public key is missing.")
-
         try:
+            if not self.signature:
+                raise ValueError("Transaction is not signed.")
+            if not self.sender:
+                raise ValueError("Sender public key is missing.")
+
             vk = VerifyingKey.from_string(bytes.fromhex(self.sender), curve=SECP256k1)
             result = vk.verify(bytes.fromhex(self.signature), self.hash.encode())
             return result
         
-        except BadSignatureError:
+        except (ValueError, BadSignatureError):
             return False
 
     def as_dict(self):
@@ -136,9 +138,12 @@ class Block:
     def mine_block(self, bc: "Blockchain", stopEvent: Event):
         """Mine the block by finding a hash that starts with the target difficulty."""
         bc.mining_active = True
-        while not self.hash.startswith(bc.difficulty) and bc.mining_active and not stopEvent.is_set():
-            self.nonce += 1
-            self.hash = self.generate_hash()
+        for _ in range(2):
+            self.hash = "0"
+            while not self.hash.startswith(bc.difficulty) and bc.mining_active and not stopEvent.is_set():
+                self.nonce += 1
+                self.hash = self.generate_hash()
+
         if self.hash.startswith(bc.difficulty) and bc.mining_active:
             return True
         else:
@@ -349,13 +354,25 @@ class Blockchain:
 
         return True
 
+    def check_recv_block_hash(self, block: Block) -> bool:
+        if not block.hash.startswith(self.difficulty):
+            return False
+        else:
+            temp_hash = block.hash
+            if block.generate_hash() != temp_hash:
+                return False
+            else:
+                return True
+
     def try_add_block(self, block: Block) -> bool:
+        if not self.check_recv_block_hash(block):
+            return False
+
         if not block.verify_transactions():
             return False
 
         last_block = self.get_latest_block()
         if block == last_block:
-            last_block.confirmation_count += 1
             return False
 
         if block.previous_hash == last_block.hash:
@@ -407,3 +424,23 @@ class Blockchain:
                     return False
             return True
         return False
+
+def createInvalidBlock():
+    with Path("config.json").open() as c:
+        blocks = []
+        config = json.load(c)
+        pub_key_A = config["A"]["publicKey"]
+        pub_key_B = config["B"]["publicKey"]
+        bc = Blockchain(pub_key_A, 5)
+        tx1 = Transaction(pub_key_A, pub_key_B, 1000000)
+        b = Block(31, "00000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", [tx1])
+        blocks.append(b.as_dict())
+        b.mine_block(bc, Event())
+        blocks.append(b.as_dict())
+        b.hash = b.hash.replace("0", "1")
+        blocks.append(b.as_dict())
+        with Path("malicious_block.json").open("w") as mb:
+            json.dump(blocks, mb)
+
+if __name__ == "__main__":
+    createInvalidBlock()
