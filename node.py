@@ -20,7 +20,7 @@ from wallet import get_public_key_from_pk
 
 # ------------- PROTOCOL - MESSAGES IMPLEMENTATION -------------
 
-DIFFICULTY_LEVEL = 6
+DIFFICULTY_LEVEL = 5
 
 class Message:
     # |VERSION(1b)|TYPE(1b)|CONTROL(1b)|SOURCE(4b)|HASH(4b)|DATA_LENGTH(2b)|DATA|
