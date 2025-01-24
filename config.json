@@ -1,0 +1,22 @@
+{
+    "A": {
+        "seed": "nodeA",
+        "privateKey": "950f9b24d15c74304df8bc8193642a806cbf7ff5d3d89636f2bc7ab71aaf8037",
+        "publicKey": "870e54c027c9c1b07f9f04abb538efb5674edd7e7e0d7004d8d3705ae30b1da7ab295d7ea9d1322cd7740b48eef4f03a95759b8c4c0cbe61083abe180d5f474f"
+    },
+    "B": {
+        "seed": "nodeB",
+        "privateKey": "517ca3ed31983a11659a559ed9611e257316d7f0214b1344428accce6f4b4e96",
+        "publicKey": "78497c6f40ab07676d53ad310a0b0d242802147ea6e4484bb4e7f59de8ff4fa582e8ac1b7ec5093905575af755568283b7732eb0b24430fff4dbcd3e4b28ef04"
+    },
+    "C": {
+        "seed": "nodeC",
+        "privateKey": "fe711b43089e3e1aeb20f7fc5ea540233d2b46392c2af7e8d4cf6f756c832c4c",
+        "publicKey": "542f59bc902c546483772b137c269dceefd0a42cb206673157901a8fc9e5377a100f98e307e157780daa20c8149ecebe54ab789ec3e78c4a03251c7d7daa9efa"
+    },
+    "D": {
+        "seed": "nodeD",
+        "privateKey": "7e3d14b7ccaa1e8f5067321b79b1fc0912110d07f4302843cb0f0fa8aeac994e",
+        "publicKey": "787f813bac001d25c4a290ee17d32fe1a2708b02a440686e590344cb791c9b1c90927edf11808d58005b7bf33a1b6be1a7d460101ae203d5591df75772e957dc"
+    }
+}

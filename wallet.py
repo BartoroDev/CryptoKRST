@@ -41,7 +41,7 @@ def p2pk_script(public_key):
     print("op: checksig")   #opcode
     pass
 
-def sign_data(seed: str, data: str) -> str:
+def sign_data(seed: str, data: str) -> dict:
     keys=get_keys_from_seed(seed, 1) #TODO:fix it later
     """Sign the given data using the private key."""
     private_key_bytes = bytes.fromhex(keys[0]["private_key"])
@@ -52,7 +52,7 @@ def sign_data(seed: str, data: str) -> str:
         "public_key": keys[0]["public_key"]
     }
 
-def sign_with_key(private_key_hex: str, data: str) -> str:
+def sign_with_key(private_key_hex: str, data: str) -> dict:
     private_key_bytes = bytes.fromhex(private_key_hex)
     sk = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
     signature = sk.sign(data.encode()).hex()
@@ -161,8 +161,8 @@ def main():
         return #todo: curl to post signed transaction
    
     wallet = {
-    'keypairs': None,
-    'transaction_cache': mock_transaction()
+        'keypairs': None,
+        'transaction_cache': mock_transaction()
     }
     if args.f != None:
         wallet = load_from_file(args.f, args.p)
@@ -186,8 +186,8 @@ def main():
     
     timestr = time.strftime("%H%M%S.dat")
     data_to_save = {
-    'keypairs': wallet['keypairs'],
-    'transaction_cache': mock_transaction()
+        'keypairs': wallet['keypairs'],
+        'transaction_cache': mock_transaction()
     }
     save_to_file(timestr, args.p, data_to_save)
     #TODO:implement api connection and user transaction cli
