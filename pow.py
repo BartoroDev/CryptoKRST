@@ -350,7 +350,15 @@ class Blockchain:
         return True
 
     def try_add_block(self, block: Block) -> bool:
-        if block.previous_hash == self.get_latest_block().hash or not block.verify_transactions():
+        if not block.verify_transactions():
+            return False
+
+        last_block = self.get_latest_block()
+        if block == last_block:
+            last_block.confirmation_count += 1
+            return False
+
+        if block.previous_hash == last_block.hash:
             if not self.mining_active:
                 self.logger.warning("Miners not mining!")
                 return False
@@ -358,7 +366,6 @@ class Blockchain:
             self.interrupt_mining()
             return self.append_block(block)
         else:
-            self.logger.warning("Received invalid block")
             return False
 
     def block_count(self):

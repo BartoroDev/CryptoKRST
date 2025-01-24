@@ -391,7 +391,7 @@ class Node:
     def prepareBlockchain(self) -> bool:
         assert self.mode is NodeMode.FULL_MODE
         miner_public_key = get_public_key_from_pk(self.wallet_key)
-        if not self.peers:
+        if len(self.connections.keys()) == 0:
             self.blockchain = Blockchain(miner_public_key, DIFFICULTY_LEVEL, logger=self.logger)
             self.logger.info("Node starts its own blockchain")
             return True
